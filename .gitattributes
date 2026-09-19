@@ -1,0 +1,32 @@
+# 行尾符策略
+#
+# 背景：v4 原件为 CRLF，v5 新代码统一 LF。阶段 1 搬迁时按字节保留了原件行尾，
+# 导致 Edit 工具（LF 匹配）无法编辑 src/rdc/ 下的搬迁文件。
+# 现固化规则：仓库内一律以 LF 存储，Windows 工作区按类型自动处理。
+
+* text=auto eol=lf
+
+# 二进制文件：禁止任何行尾转换
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.icns binary
+*.pem binary
+*.p12 binary
+*.pyd binary
+*.so binary
+*.dylib binary
+*.zip binary
+*.exe binary
+*.dmg binary
+*.AppImage binary
+*.deb binary
+*.rpm binary
+
+# Windows 专用脚本保留 CRLF（cmd.exe 要求）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.iss text eol=crlf
+*.ps1 text eol=crlf
