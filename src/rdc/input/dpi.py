@@ -47,7 +47,9 @@ class DPIAdapter:
                 try:
                     ctypes.windll.user32.SetProcessDPIAware()
                 except AttributeError:
-                    pass
+                    # 两个 DPI 感知 API 都不存在（极旧系统）；放弃设置，
+                    # 后续按系统默认 DPI 处理。记录而非静默（约束 6）。
+                    self.logger.debug("系统无 DPI 感知 API，跳过进程 DPI 设置")
             
             try:
                 hwnd = ctypes.windll.user32.GetDesktopWindow()

@@ -197,14 +197,7 @@ class RemoteService:
         # 关闭客户端（v4.0.0：强制shutdown中断阻塞recv）
         with self._client_lock:
             for conn in list(self._clients):
-                try:
-                    conn.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                self._shutdown_and_close(conn, "暂停服务")
             self._clients.clear()
             self._client_threads.clear()
 
@@ -212,24 +205,18 @@ class RemoteService:
         self._broadcaster.stop()
 
         # 关闭服务器 socket
-        if self._server_socket:
-            try:
-                self._server_socket.close()
-            except Exception:
-                pass
-            self._server_socket = None
-        if self._control_socket:
-            try:
-                self._control_socket.close()
-            except Exception:
-                pass
-            self._control_socket = None
+        self._close_quietly(self._server_socket, "暂停服务(主端口)")
+        self._server_socket = None
+        self._close_quietly(self._control_socket, "暂停服务(控制端口)")
+        self._control_socket = None
 
         # 关闭线程池（不等待，因为可能还有任务）
         try:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
-            pass
+            # 线程池异常面不确定（可能已被前次 pause/resume 关闭）。
+            # 保持宽捕获以免异常逸出中断暂停流程，但记录而非静默（约束 6）。
+            self.logger.debug("暂停服务: 关闭线程池异常", exc_info=True)
 
         # PID文件保留，表示进程还在
         self.logger.info("✅ 服务已暂停（进程保持运行，托盘保留）")
@@ -371,18 +358,10 @@ class RemoteService:
             
         except OSError as e:
             self.logger.error(f"端口绑定失败: {e}")
-            if self._server_socket:
-                try:
-                    self._server_socket.close()
-                except:
-                    pass
-                self._server_socket = None
-            if self._control_socket:
-                try:
-                    self._control_socket.close()
-                except:
-                    pass
-                self._control_socket = None
+            self._close_quietly(self._server_socket, "端口绑定失败(主端口)")
+            self._server_socket = None
+            self._close_quietly(self._control_socket, "端口绑定失败(控制端口)")
+            self._control_socket = None
             return False
         except Exception as e:
             self.logger.error(f"启动服务器失败: {e}")
@@ -406,8 +385,9 @@ class RemoteService:
                     self.logger.warning(f"TLS握手失败 {addr}: {e}")
                     try:
                         raw_conn.close()
-                    except Exception:
-                        pass
+                    except OSError:
+                        # 握手失败的连接可能已损坏，关闭异常不阻断；记录以便排查泄漏。
+                        self.logger.debug("TLS握手失败后关闭连接异常", exc_info=True)
                     continue
 
                 if not self._rate_limiter.allow():
@@ -551,14 +531,7 @@ class RemoteService:
                 self._client_threads.pop(conn, None)
             self._connection_semaphore.release()
             self._stats['active_connections'] -= 1
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                conn.close()
-            except Exception:
-                pass
+            self._shutdown_and_close(conn, f"客户端清理({client_addr})")
             self.logger.info(f"客户端已清理: {client_addr} (活跃: {self._stats['active_connections']})")
             if self._tray:
                 self._tray.update_client_count(self.get_client_count())
@@ -808,6 +781,42 @@ class RemoteService:
 
     # ========== v4.0.1：会话令牌认证（画面通道） ==========
 
+    def _close_quietly(self, sock: socket.socket | None, context: str) -> None:
+        """尽力关闭监听 socket；失败仅记录，不中断清理流程。
+
+        Args:
+            sock: 待关闭的 socket；为 None 时直接返回。
+            context: 调用场景描述，用于日志定位（如 "暂停服务"）。
+        """
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            # 清理路径的关闭失败不阻断主流程；记录以便排查句柄泄漏。
+            self.logger.debug(f"{context}: 关闭监听 socket 异常", exc_info=True)
+
+    def _shutdown_and_close(self, conn: socket.socket, context: str) -> None:
+        """尽力断开并关闭客户端连接。
+
+        先 ``shutdown(SHUT_RDWR)`` 中断对端可能阻塞的 ``recv``，再 ``close``。
+        两步都可能失败（对端已断开、句柄已失效），失败仅记录不抛出，
+        确保清理流程完整执行——这是 v4 ``try/except: pass`` 的等价替换，
+        区别在于不再静默（约束 6）。
+
+        Args:
+            conn: 待关闭的客户端连接。
+            context: 调用场景描述，用于日志定位。
+        """
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            self.logger.debug(f"{context}: shutdown 异常（对端可能已断开）", exc_info=True)
+        try:
+            conn.close()
+        except OSError:
+            self.logger.debug(f"{context}: 关闭客户端连接异常", exc_info=True)
+
     def _send_auth_response(self, conn: socket.socket, status: str, token: str | None = None) -> None:
         """发送长度前缀的JSON认证响应（v4.0.1）"""
         payload = {'status': status}
@@ -816,8 +825,10 @@ class RemoteService:
         data = json.dumps(payload).encode('utf-8')
         try:
             conn.sendall(struct.pack('>I', len(data)) + data)
-        except Exception:
-            pass
+        except OSError:
+            # 认证响应发送失败通常是客户端已断开；记录但不抛出，
+            # 由调用方（_handle_client）按认证结果决定关闭连接。
+            self.logger.debug(f"发送认证响应失败(status={status})", exc_info=True)
 
     def _cleanup_expired_tokens(self) -> None:
         """清理过期的会话令牌"""
@@ -997,37 +1008,23 @@ class RemoteService:
 
         with self._client_lock:
             for conn in list(self._clients):
-                try:
-                    conn.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                self._shutdown_and_close(conn, "关闭服务")
             self._clients.clear()
             self._client_threads.clear()
 
         # 停止广播器
         self._broadcaster.stop()
 
-        if self._server_socket:
-            try:
-                self._server_socket.close()
-            except Exception:
-                pass
-            self._server_socket = None
-        if self._control_socket:
-            try:
-                self._control_socket.close()
-            except Exception:
-                pass
-            self._control_socket = None
+        self._close_quietly(self._server_socket, "关闭服务(主端口)")
+        self._server_socket = None
+        self._close_quietly(self._control_socket, "关闭服务(控制端口)")
+        self._control_socket = None
 
         try:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
-            pass
+            # 与 pause() 同理：保持宽捕获避免异常逸出中断退出流程，记录而非静默。
+            self.logger.debug("关闭服务: 关闭线程池异常", exc_info=True)
 
         self.pid_manager.remove()
         self.logger.info("✅ 服务已完全关闭，进程即将退出")

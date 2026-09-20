@@ -10,7 +10,9 @@ name = "rdc"
 version = "5.0.0"
 description = "远程桌面控制 — 跨平台主控端/被控端，asyncio + PySide6 + H.264"
 readme = "README.md"
-requires-python = ">=3.11"
+# numpy>=2.5 要求 Python >=3.12（其存根用 PEP 695 type 语句），故下限锁 3.12。
+# 见 PROGRESS.md 发现 1 与用户 2026-09-20 确认的方案 A。
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "RemoteDesktop Control Team" }]
 keywords = ["remote-desktop", "remote-control", "pyside6", "asyncio", "h264"]
@@ -23,7 +25,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -135,7 +136,7 @@ include = ["src/rdc", "tests", "scripts", "proto", "README.md", "CHANGELOG.md"]
 # ============================================================================
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests", "scripts"]
 # legacy_v4/ 是待重写的 Tkinter 参考代码（阶段 6 后删除）；pb/ 是 protoc 生成物
 extend-exclude = [
