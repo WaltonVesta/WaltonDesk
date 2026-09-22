@@ -13,3 +13,5 @@ dist/
 htmlcov/
 .coverage
 src/rdc/protocol/pb/
+.coverage.*
+*.egg-info/

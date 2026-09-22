@@ -159,6 +159,7 @@ class TestPacketBuffer:
         buf = PacketBuffer()
         # 构造一个 length 字段为超大值的假头部
         import struct
+
         from rdc.constants import MAX_PACKET_SIZE
         fake_header = struct.pack(
             ">4sBBB I I", PROTOCOL_MAGIC, 1, PKT_TYPE_CONTROL, 0,

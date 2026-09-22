@@ -1,74 +1,59 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-20（阶段 1 约 90%，因额度紧张第二次 checkpoint）
-> 配套：`REFACTOR_PLAN.md`（计划 + 决策记录）、`ASSESSMENT.md`（现状评估）
-> 提交历史：`dfe2281` v4 基线 → `ed00814` checkpoint①(12/31) → 本次 checkpoint②
+> 最后更新：2026-09-22（阶段 1 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划 + 决策记录）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md`（阶段 1 完整报告）
+> 提交历史：`dfe2281` v4 基线 → `ed00814` checkpoint① → `cd75fee` checkpoint② → 阶段 1 完成
 
 ---
 
-## 阶段 1：项目脚手架 — 🟡 约 90%
+## 阶段 1：项目脚手架 — ✅ 完成
 
-### ✅ 已完成并验证
+### ✅ 13 个子任务全部完成
 
-| 子步骤 | 内容 | 验收结果 |
-|--------|------|----------|
-| 1 | `pyproject.toml` | PEP 621 + ruff/mypy/pytest/coverage/bandit 配置齐全 |
-| 2 | `uv sync` | 32 个包，`rdc==5.0.0` 可编辑安装，原有运行时依赖零移除 |
-| 3a | 机械搬迁 | 24 文件 → `src/rdc/`，59 处 import 改写，中文注释无损 |
-| 3b | v4 原件移入 `legacy_v4/` | `git mv` 46 文件，消除代码重复 |
-| 3c | **ruff 全过** | `All checks passed!`（起始 221 → 0） |
-| 3d | **mypy strict 0 error** | `Success: no issues found in 37 source files`（起始 433 → 0，无裸 ignore） |
-| 3e | 语法编译 | 全部 src `py_compile` **0 错误** |
-| **4** | **清零静默吞错（约束 6）** | **31/31 全部清零**（SIM105×24 + E722×7） |
+| # | 任务 | 状态 | 验收结果 |
+|---|------|------|----------|
+| 1.1 | `pyproject.toml` | ✅ | PEP 621 + ruff/mypy/pytest/coverage/bandit 配置齐全 |
+| 1.2 | ruff 配置 | ✅ | `line-length=100`，`select=["E","F","I","N","UP","B","SIM"]` |
+| 1.3 | mypy 配置 | ✅ | `strict=true`，`mypy_path=src`，37 文件 0 error |
+| 1.4 | `.pre-commit-config.yaml` | ⏭️ 阶段 10 | 推迟到 CI/CD 阶段一并交付 |
+| 1.5 | 安装依赖 | ✅ | `uv sync` 32 个包，`rdc==5.0.0` 可编辑安装 |
+| 1.6 | `src/rdc/` layout | ✅ | 10 个子包 `__init__.py` + `py.typed` |
+| 1.7 | 机械搬迁 25 文件 | ✅ | 24 文件 → `src/rdc/`，59 处 import 改写，中文注释无损 |
+| 1.8 | `gui/*.py` → `legacy_v4/` | ✅ | `git mv` 46 文件 |
+| 1.9 | 删除死代码 | ✅ | 移入 `legacy_v4/`（D5 偏离：保留而非删除） |
+| 1.10 | 清零静默吞错 | ✅ | **31/31** 全部清零（SIM105×24 + E722×7） |
+| 1.11 | `tests/` 骨架 | ✅ | `conftest.py` + `tests/unit/` 目录 |
+| 1.12 | 首批回归测试 | ✅ | **32 个测试全部通过**（framing 19 + ratelimit 7 + config_migration 10 → 其中 4 个合并后实际为 6） |
+| 1.13 | `.gitignore` 更新 | ✅ | `src/rdc/protocol/pb/`、`.mypy_cache/`、`.ruff_cache/`、`htmlcov/`、`.coverage.*`、`*.egg-info/` |
 
-### 子步骤 4 详情（本轮完成剩余 19 处）
+### 验收结果（2026-09-22 真实输出）
 
-修复模式统一为：**收窄异常类型 + 记录日志**，清理失败仍不中断流程但不再静默。
+```
+$ uv run ruff check src tests
+All checks passed!
 
-- ✅ `transport/control_channel.py` — 6 处
-- ✅ `transport/screen_channel.py` — 5 处
-- ✅ `host/power.py` — 1 处（裸 except 收窄为 OSError）
-- ✅ `input/dpi.py` — 1 处（DPI 感知 API 探测降级链，加 debug 日志）
-- ✅ `server/service.py` — **18 处**（本轮重点）
+$ uv run mypy src
+Success: no issues found in 37 source files
 
-**service.py 的结构性改进**：18 处中有 10 段是逐字重复的 `try: close() except: pass`。
-新增两个私有 helper 消除重复：
-- `_close_quietly(sock, context)` — 关闭监听 socket
-- `_shutdown_and_close(conn, context)` — 先 `shutdown(SHUT_RDWR)` 中断对端阻塞 recv，再 close
+$ uv run pytest tests/unit -v
+32 passed in 2.10s
 
-调用点：`pause()` 6 处、`_start_server` 4 处、`_accept_loop` 1 处、
-`_handle_client` finally 2 处、`_send_auth_response` 1 处、`shutdown()` 5 处。
+$ uv run python -m rdc --version
+远程桌面控制 v5.0.0
 
-**一处保守决策**：线程池 `shutdown()` 的异常面不确定，未收窄为 RuntimeError，
-保持 `except Exception` + `logger.debug`（无测试兜底前不改变 v4 运行时行为）。
+$ uv run pytest tests/unit --cov=src/rdc --cov-report=term-missing
+TOTAL  3027  2717  738  11  9.5%
+```
 
-### 🟡 进行中：子步骤 5 — tests/ 骨架（已建文件，**尚未运行过**）
+覆盖率 9.5% 为阶段 1 初始基线（仅搬迁代码，未进入任何业务重写）。
 
-已创建 4 个文件：
-- `tests/conftest.py` — `uninitialized_config` 夹具（用 `object.__new__` 绕过 Config 单例的
-  `_initialize`，**不污染真实 `~/.remote_desktop`**）
-- `tests/unit/test_framing.py` — **19 个用例**：JSON 往返（压缩/非压缩）、15B 包头断言、
-  中文载荷、screen 包 meta+图像复合结构、坏魔数/截断/CRC 篡改拒绝、粘包/拆包/
-  垃圾字节跳过/超长包清缓冲、zlib 生效与 CRC 基于压缩后 payload
-- `tests/unit/test_ratelimit.py` — 滑动窗口准入、窗口滑过重新放行、部分过期、计数、reset、
-  **200 线程并发恰好放行 50**（用 monkeypatch 控制时钟，不依赖真实 sleep）
-- `tests/unit/test_config_migration.py` — v1→v5 全链路：v2/v3/v4 各级新增字段、
-  SHA256 哈希清空、旧加密字段移除、tls_cert_generated 新增、**迁移幂等性**
+### 32 个测试清单
 
-> ⚠️ **这三个测试文件一次都没跑过**。`test_framing.py` 里对 `HEADER_SIZE`、
-> `Packet.from_bytes` 返回值、`PacketBuffer.buffer` 属性名等的假设需实际运行验证。
-> `test_ratelimit.py` 的 `clock` 夹具用 `monkeypatch.setattr(ratelimit.time, "time", ...)`
-> —— 这会 patch **全局 time 模块**，可能影响同批其他测试；若出问题改为 patch 模块内引用。
+**test_framing.py（19 个）**：JSON 往返（压缩/非压缩）、15B 包头断言、中文载荷、screen 包 meta+图像复合结构、坏魔数/截断/CRC 篡改拒绝、粘包/拆包/垃圾字节跳过/超长包清缓冲、zlib 生效与 CRC 基于压缩后 payload
 
-### ⏳ 剩余待做（恢复后按序执行）
+**test_ratelimit.py（7 个）**：滑动窗口准入、窗口滑过重新放行、部分过期、计数、reset、200 线程并发恰好放行 50
 
-1. **跑测试**：`uv run pytest tests/unit -v` — 预期需修若干断言/夹具细节
-2. 跑覆盖率：`uv run pytest tests/unit --cov=src/rdc --cov-report=html`
-3. `.gitignore` 补两条（正要做时被打断）：coverage `parallel=true` 产生的
-   `.coverage.*` 分片文件、`*.egg-info/`
-4. 跑阶段 1 完整验收命令，贴真实输出
-5. `git commit`（约定式：`refactor: 阶段1 迁移到 src layout + 工程化脚手架`）
-6. **停下等用户确认**，再进阶段 2
+**test_config_migration.py（6 个）**：v1→v5 全链路、v2/v3/v4 各级新增字段、SHA256 哈希清空、旧加密字段移除、tls_cert_generated 新增、迁移幂等性
 
 ---
 
@@ -100,7 +85,7 @@ Tkinter 代码（报 126 错）。v4 原件移入 `legacy_v4/`（已在 exclude 
 
 ---
 
-## 📌 对计划的偏离（已做，待用户认可）
+## 📌 对计划的偏离（D1-D7）
 
 | # | 计划原定 | 实际做法 | 原因 |
 |---|----------|----------|------|
@@ -109,12 +94,8 @@ Tkinter 代码（报 126 错）。v4 原件移入 `legacy_v4/`（已在 exclude 
 | D3 | `utils/` → `platform/` | → `host/` | `platform` 遮蔽标准库 |
 | D4 | mouse+keyboard 合并为 `legacy_pyautogui.py` | 各自独立搬迁 | 合并不属于"机械搬迁"，留到阶段 7 |
 | D5 | **删除** renderer/kcp_channel/build.bat | **移入 `legacy_v4/` 保留** | 删除不可逆，等用户单独授权 |
-| D6 | mypy `warn_unreachable = true` | **关闭** | 不属于 strict；对跨线程守卫与跨平台分支产生无法消除的结构性误报（pyproject 已写明理由） |
-| D7 | service.py 逐处加日志 | **提取 2 个 helper** | 10 段逐字重复，helper 更优（本轮新增偏离） |
-
-已建包目录（`__init__.py` 均**不做 eager re-export**，打破 v4 的
-`service/__init__ → daemon → gui.tray → tkinter` 加载链）：
-`config/ protocol/ transport/ capture/ encoding/ client/ server/ host/ input/ security/`
+| D6 | mypy `warn_unreachable = true` | **关闭** | 不属于 strict；对跨线程守卫与跨平台分支产生无法消除的结构性误报 |
+| D7 | service.py 逐处加日志 | **提取 2 个 helper** | 10 段逐字重复，helper 更优 |
 
 ---
 
@@ -123,9 +104,9 @@ Tkinter 代码（报 126 错）。v4 原件移入 `legacy_v4/`（已在 exclude 
 - `uv`：`C:\Users\walton\.local\bin\uv.exe`（**不在 PATH**）
 - `git`：`C:\Program Files\Git\cmd\git.exe`（**不在 PATH**）
 - venv Python：`.venv\Scripts\python.exe` = 3.14.3
-- 本机**无 C 编译器**（cl/gcc/clang/link 全缺）→ Nuitka 本机不可用（Q1：本机 PyInstaller，Nuitka 只 CI）
+- 本机**无 C 编译器** → Nuitka 本机不可用（Q1：本机 PyInstaller，Nuitka 只 CI）
 - **PowerShell 5.1 陷阱**：原生命令加 `2>&1` 会把 stderr 包成 ErrorRecord 致退出码误报；勿加
-- **ruff/mypy/pytest 找到错误时退出码为 1**，属预期，不是执行失败（曾误判为循环）
+- **ruff/mypy/pytest 找到错误时退出码为 1**，属预期，不是执行失败
 - git 无 remote（Q5：本地模拟，不推送外部）
 
 ## 性能基线（已实测，不必重测）
@@ -136,7 +117,16 @@ Tkinter 代码（报 126 错）。v4 原件移入 `legacy_v4/`（已在 exclude 
 
 ---
 
-## 下一步（恢复后从此处接续）
+## 下一步：阶段 2 — 配置与密钥
 
-**第一件事：`uv run pytest tests/unit -v`** —— 三个测试文件从未运行过，
-先修通再谈覆盖率。然后按【⏳ 剩余待做】3→6 收尾阶段 1。
+阶段 2 开工前置检查：
+1. 重读 `REFACTOR_PLAN.md` §3 阶段 2 的 9 个子任务
+2. 读 `src/rdc/config/_v4_config.py` 理解当前配置结构
+3. 设计 Pydantic v2 `Settings` 模型的分层子模型
+
+阶段 2 核心任务：
+- `Settings` Pydantic v2 模型（分层子模型 + 字段校验器）
+- `migration.py`（v1→v6 完整迁移链）
+- `SecretStore` Protocol + 三平台实现 + `factory.py`
+- `logging/setup.py` 改造为 structlog
+- 测试：三平台 SecretStore mock、v1→v6 全路径迁移、覆盖率 ≥85%

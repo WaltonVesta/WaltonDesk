@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from rdc.config._v4_config import CONFIG_VERSION, Config
 
 
