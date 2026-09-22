@@ -46,3 +46,8 @@ class AuthError(RemoteDesktopError):
 class BlacklistError(RemoteDesktopError):
     """IP黑名单错误"""
     pass
+
+
+class SecretStoreError(RemoteDesktopError):
+    """密钥存储错误（阶段 2 新增：SecretStore 各后端统一异常）"""
+    pass

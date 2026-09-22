@@ -362,6 +362,9 @@ parallel = true
 omit = [
     "src/rdc/protocol/pb/*",  # protoc 生成物
     "src/rdc/__main__.py",
+    # TODO(phase-4/6): v4 兼容遗留层。个人版策略下不再扩展（2026-09-22 决定），
+    # 调用点在阶段 4/6 重写时逐个换成 Settings，届时随 legacy_v4/ 一并删除。
+    "src/rdc/config/_v4_config.py",
 ]
 
 [tool.coverage.report]
