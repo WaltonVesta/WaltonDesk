@@ -18,6 +18,14 @@ class ProtocolError(RemoteDesktopError):
     pass
 
 
+class HmacVerificationError(ProtocolError):
+    """帧完整性校验失败（阶段 3 新增：HMAC-SHA256 trailer 不匹配）。
+
+    继承 :class:`ProtocolError`，使传输层可用统一异常面处理"帧不可信"。
+    """
+    pass
+
+
 class ScreenCaptureError(RemoteDesktopError):
     """屏幕捕获错误"""
     pass

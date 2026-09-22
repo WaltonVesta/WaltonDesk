@@ -177,6 +177,10 @@ ignore = [
 "src/rdc/input/dpi.py" = ["N806"]            # DCX_WINDOW 等 Win32 常量
 "src/rdc/server/pid_manager.py" = ["N806"]   # PROCESS_QUERY_LIMITED_INFORMATION
 "src/rdc/server/service.py" = ["N806"]       # MAX_BAN_RECORDS
+# N812：协议层 `constants as C` / `messages as M` 单字母别名是 wire 代码惯例，
+# 缩短逐包构造/解析路径中高频字段前缀，提升往返代码可读性。
+"src/rdc/protocol/**" = ["N812"]
+"tests/unit/test_protocol_*.py" = ["N812"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["rdc"]
@@ -269,7 +273,9 @@ ignore_missing_imports = true
 # 消解时间表：
 #   TODO(phase-2):  移除 rdc.config._v4_config（Pydantic Settings 重写）
 #                   移除 rdc.logger（structlog 改造）
-#   TODO(phase-3):  移除 rdc.protocol.framing、rdc.constants、rdc.exceptions
+#   ✅(phase-3):    已移除 rdc.protocol.framing（v5 重写补注解）、
+#                   rdc.constants（协议常量拆到 protocol/constants 并全注解）、
+#                   rdc.exceptions（全部类已注解；根级残留见下行说明）
 #   TODO(phase-4):  移除 rdc.transport.*（asyncio 重写）
 #   TODO(phase-3/4):移除 rdc.server.service、rdc.server.pid_manager（拆分）
 #   TODO(phase-5):  移除 rdc.capture.*、rdc.encoding.jpeg（向量化 + H.264）
@@ -280,13 +286,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     # 根级
-    "rdc.constants",
-    "rdc.exceptions",
-    "rdc.logger",
-    # config（阶段 2 重写）
+    "rdc.constants",        # ⚠️ 阶段 4/5 调用点切到 protocol/constants 后整体删除本文件残留常量时移除
     "rdc.config._v4_config",
-    # protocol（阶段 3 扩展）
-    "rdc.protocol.framing",
     # transport（阶段 4 asyncio 重写）
     "rdc.transport.control_channel",
     "rdc.transport.screen_channel",
@@ -398,7 +399,6 @@ source = ["src/rdc"]
 # ============================================================================
 [tool.bandit]
 exclude_dirs = ["legacy_v4", "tests", "src/rdc/protocol/pb", "build", "dist"]
-# B324 (hashlib) 需保留：v4 兼容路径用 MD5 做非安全用途的帧校验，
-# 阶段 9 会加 usedforsecurity=False 并说明，届时移除此跳过项。
-# TODO(phase-9): 移除 B324 跳过
-skips = ["B324"]
+# ✅(phase-3): 原 B324 跳过（framing MD5）已随 v5 重写移除 ——
+# create_screen 校验字段改用 SHA-256（usedforsecurity=False），src/ 内无 MD5 残留。
+skips = []

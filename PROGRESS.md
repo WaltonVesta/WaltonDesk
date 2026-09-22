@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-22（阶段 2 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 完成 → 本次阶段 2 完成
+> 最后更新：2026-09-23（阶段 3 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md`（阶段报告）
+> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 本次阶段 3
 
 ---
 
@@ -25,6 +25,8 @@
 ## 阶段 1：项目脚手架 — ✅ 完成（详见 STAGE1_REPORT.md）
 
 ## 阶段 2：配置与密钥 — ✅ 完成（详见 STAGE2_REPORT.md）
+
+## 阶段 3：协议层（简化版）— ✅ 完成（详见 STAGE3_REPORT.md）
 
 ### 子任务状态（对照 REFACTOR_PLAN §3，含范围调整）
 
@@ -89,6 +91,7 @@ $ uv run python -m rdc --version
 
 - uv / git 不在 PATH（全路径调用）；PowerShell 5.1 勿加 `2>&1`；lint 工具退出码 1 属预期
 - 本机无 C 编译器；git 无 remote
+- 阶段 3 起：grpcio-tools 1.84.0 / protobuf 7.36.2 已装（`uv sync --group proto`）
 
 ## 性能基线（不变）
 
@@ -97,20 +100,51 @@ $ uv run python -m rdc --version
 
 ---
 
-## 下一步：阶段 3 — 协议层（范围调整后）
+## 阶段 3：协议层（简化版）— ✅ 完成（详见 STAGE3_REPORT.md）
 
-| # | 任务 | 说明 |
+### 子任务状态（对照任务书 §五）
+
+| # | 任务 | 状态 |
 |---|------|------|
-| 3.1 | `proto/rdc.proto` | 8 个 message + PayloadType/StreamCmd 枚举 |
-| 3.2 | `scripts/gen_proto.py` | grpcio-tools 生成到 `protocol/pb/`（已 gitignore） |
-| 3.3 | `protocol/messages.py` | 领域 dataclass（wire 无关） |
-| 3.4 | `protocol/codec.py` | v5 Protobuf 编解码（~~双版本分派~~ 已砍） |
-| 3.5 | `protocol/framing.py` 扩展 | Version 字段启用（v5=2）、`PKT_FLAG_HMAC=0x08` |
-| 3.6 | `protocol/hmac_integrity.py` | HMAC-SHA256 + TLS exporter 派生密钥 |
-| ~~3.7~~ | ~~legacy_v4.py~~ | **砍除**（范围调整） |
-| 3.8 | hypothesis property-based 往返测试 | |
-| 3.9 | 分帧模糊测试（10,000 例不崩溃） | |
-| ~~3.10~~ | ~~v4 golden bytes~~ | **降级**为 v5 自身的字节级快照测试（防序列化回归，非兼容目的） |
+| 3.1 | `proto/rdc.proto`：8 message + 8 枚举 | ✅ |
+| 3.2 | `scripts/gen_proto.py` → `protocol/pb/`（含 .pyi 存根，已 gitignore） | ✅ |
+| 3.3 | `protocol/messages.py`：8 frozen dataclass（构造期语义校验）+ 7 IntEnum | ✅ |
+| 3.4 | `protocol/codec.py`：v5 Protobuf 单路径门面（错误统一 ProtocolError） | ✅ |
+| 3.5 | `protocol/framing.py` v5 重写：Version=2 启用、HMAC=0x08、**PRE_COMPRESSED=0x10 显式跳过 zlib**（互斥校验） | ✅ |
+| 3.6 | `protocol/hmac_integrity.py`：HMAC-SHA256 + TLS exporter（Protocol 适配器，⚠️F1）+ HKDF 兜底 | ✅ |
+| ~~3.7~~ | ~~legacy_v4.py~~ | ❌ 砍除（范围调整） |
+| 3.8 | hypothesis 往返（8 类全覆盖 + 边界 + 枚举穷举） | ✅ |
+| 3.9 | 模糊 2×10,000 例不崩溃 + 恶意长度分配前拒绝（叮嘱 c） | ✅ |
+| 3.10 | v5 字节快照 ×13（替代 v4 golden-bytes） | ✅ |
 
-**风险 R1/R2（v4 握手陷阱/配置错位地雷）随范围调整直接消失。**
-开工前置：`uv sync --group proto`（grpcio-tools 已在锁文件，确认 venv 内可用）。
+### 验收结果（2026-09-23 真实输出）
+
+```
+ruff:   All checks passed!
+mypy:   Success: no issues found in 54 source files
+pytest: 299 passed in 10.41s（新增 136）
+protocol/ 覆盖率: 99.8%（验收线 ≥85%）
+全局覆盖率: 33.6%（阶段 2 为 24.9%）
+python -m rdc --version → 远程桌面控制 v5.0.0
+```
+
+### 📌 阶段 3 新增发现/决定
+
+| # | 内容 |
+|---|------|
+| **F1** | **`ssl.SSLSocket.export_keying_material` 在 Python 中不存在**（实测 3.14.3：SSLSocket/SSLObject/SSLSession 全无；CPython 未暴露 OpenSSL `SSL_export_keying_material`）。阶段 3 按 Protocol 适配器落地；**真实 TLS 栈选型为阶段 4 前置决策**：A=pyOpenSSL Connection（RFC 5705，自 17.4.0，Apache-2.0）/ B=TLS 通道内 nonce + HKDF（零依赖）。有测试锁定 stdlib 缺失事实，API 出现时提醒复审 |
+| D11 | `PKT_TYPE_KEY_EVENT=0x12`：Protobuf 按包头 Type 静态分派，鼠标/键盘拆型 |
+| D12 | ScreenFrame 恒置 PRE_COMPRESSED（载荷语义即压缩字节）；zlib 仅用于非画面大载荷显式 compress=True |
+| D13 | codec→pb 枚举字段用 `cast` 弥合存根要求（运行时 protobuf 接受等值 int，零成本） |
+| — | MD5 清零（create_screen→SHA-256），bandit B324 跳过项移除；mypy 宽松清单兑现 TODO(phase-3) 移除 framing/constants/exceptions；README"v4 向后兼容"改写为 v5 不兼容声明；R1/R2 风险随 v4 兼容砍除正式解除 |
+
+---
+
+## 下一步：阶段 4 — 传输层（asyncio + TLS）
+
+1. **先决策 F1**（exporter 路径 A/B）→ `transport/tls.py`（SSLContext 强制 TLS1.2+、TOFU、exporter 接入）
+2. `transport/base.py` Channel Protocol → control/screen channel asyncio 重写
+3. **v5 握手改造**：AuthRequest/AuthResponse 即普通帧（协议自描述）；会话建立后 `require_hmac=True` 强制完整性
+4. `session_token.py` + `backpressure.py` + 修复 B3（head-of-line blocking）+ heartbeat/reconnect asyncio 化
+5. 调用点从 `framing.create_json/create_screen` 切 `codec.encode_frame`，删 v4 遗留面
+6. 验收：双进程集成全绿 · 100 并发无泄漏 · 令牌重放必失败 · transport/ ≥85%

@@ -1,3 +1,17 @@
+> ⚠️ **2026-09-22 范围重大调整**
+> 
+> 用户决定砍掉"v4 兼容"（用户只用 v5，v4 不稳定）：
+> - §5 Q4（v4 兼容保留期）**作废**
+> - §3 阶段 3 的 `legacy_v4.py` / 协议双版本 / golden-bytes 测试**作废**
+> - 硬性约束 5（v5.0 保留 v4 兼容）**作废**
+> 
+> 详见 `PROGRESS.md` 的"⚡ 范围重大调整"和 `STAGE2_REPORT.md` §0。
+> 
+> 本文件保留为"原始计划"（决策演化轨迹），实际执行以 PROGRESS + STAGE*_REPORT 为准。
+
+
+
+
 # REFACTOR_PLAN.md — remote_desktop v4.0.3 → v5.0.0
 
 > 配套文档：`ASSESSMENT.md`（现状评估，含全部行号级证据与实测数据）

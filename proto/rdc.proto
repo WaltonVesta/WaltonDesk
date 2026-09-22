@@ -1,0 +1,172 @@
+// proto/rdc.proto — 远程桌面控制 v5 协议载荷定义
+//
+// 阶段 3（协议层，简化版）：v5 单版本 Protobuf 载荷。
+// 依据 2026-09-22 范围调整，v4 JSON 兼容层已砍除，本文件只描述 v5 消息。
+//
+// wire 结构（见 rdc/protocol/framing.py）：
+//   [Magic "RDPC" 4B][Version 1B=2][Type 1B][Flags 1B][Length 4B BE][CRC32 4B BE][Payload]
+//   当 Flags & PKT_FLAG_HMAC(0x08) 置位时，Payload 之后追加 32B HMAC-SHA256 trailer。
+//   Payload 即本文件对应 message 的 protobuf 序列化字节，由 Type 字段决定用哪个 message 解析。
+//
+// 所有 enum 的 0 值为 *_UNSPECIFIED（proto3 要求 0 为默认值）。
+// 域内 IntEnum（rdc/protocol/messages.py）与本文件 enum 数值逐一对齐，由 codec.py 做映射。
+
+syntax = "proto3";
+
+package rdc.v5;
+
+// ---------------------------------------------------------------------------
+// 载荷类型（与 framing 的 Type 字节一一对应，供 codec 分派与自描述）
+// ---------------------------------------------------------------------------
+enum PayloadType {
+  PAYLOAD_UNSPECIFIED = 0;
+  PAYLOAD_AUTH_REQUEST = 0x10;        // C→S
+  PAYLOAD_AUTH_RESPONSE = 0x11;       // S→C
+  PAYLOAD_SCREEN_FRAME = 0x01;        // S→C
+  PAYLOAD_MOUSE_EVENT = 0x02;         // C→S（CONTROL）
+  PAYLOAD_KEY_EVENT = 0x12;           // C→S
+  PAYLOAD_CLIPBOARD_EVENT = 0x05;     // 双向
+  PAYLOAD_STREAM_CONTROL = 0x20;      // C→S
+  PAYLOAD_HEARTBEAT = 0x03;           // 双向
+}
+
+// ---------------------------------------------------------------------------
+// 认证
+// ---------------------------------------------------------------------------
+message AuthRequest {
+  // 服务端 bcrypt 校验的口令明文（TLS 通道内传输）
+  string password = 1;
+  // 客户端自我标识（诊断/审计用，可选）
+  string client_name = 2;
+  // 协议版本（便于日志排查，当前固定 2）
+  uint32 protocol_version = 3;
+}
+
+message AuthResponse {
+  bool ok = 1;
+  // 认证成功后签发的会话令牌（后续画面通道凭此连接）
+  string token = 2;
+  // 失败原因（ok=false 时有意义；自由文本，UI 直显）
+  string reason = 3;
+  // 服务端协议版本
+  uint32 protocol_version = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 画面帧
+// ---------------------------------------------------------------------------
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_JPEG = 1;   // 回退路径：单帧 JPEG
+  CODEC_H264 = 2;   // 主路径：H.264 Annex-B NAL（可含多 NAL）
+}
+
+message ScreenFrame {
+  uint32 seq = 1;            // 帧序号（单调递增，用于丢帧统计/对齐）
+  double timestamp = 2;      // 采集时刻（epoch 秒）
+  uint32 width = 3;          // 帧像素宽（编码前）
+  uint32 height = 4;         // 帧像素高
+  Codec codec = 5;           // 编码格式
+  bool keyframe = 6;         // 是否为关键帧（H.264 IDR / JPEG 恒 true）
+  bytes data = 7;            // 编码后的压缩字节流（已是压缩态 → framing 跳过 zlib）
+}
+
+// ---------------------------------------------------------------------------
+// 输入事件
+// ---------------------------------------------------------------------------
+enum MouseAction {
+  MOUSE_ACTION_UNSPECIFIED = 0;
+  MOUSE_MOVE = 1;
+  MOUSE_PRESS = 2;
+  MOUSE_RELEASE = 3;
+  MOUSE_CLICK = 4;
+  MOUSE_SCROLL = 5;
+  MOUSE_DRAG = 6;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  MOUSE_LEFT = 1;
+  MOUSE_RIGHT = 2;
+  MOUSE_MIDDLE = 3;
+}
+
+message MouseEvent {
+  int32 x = 1;                    // 目标屏幕坐标 X（被控端绝对坐标）
+  int32 y = 2;                    // 目标屏幕坐标 Y
+  MouseAction action = 3;
+  MouseButton button = 4;         // scroll/click/press/release 时有意义
+  int32 scroll_delta = 5;         // 滚轮增量（正=上，负=下）
+  double timestamp = 6;
+}
+
+enum KeyAction {
+  KEY_ACTION_UNSPECIFIED = 0;
+  KEY_PRESS = 1;
+  KEY_RELEASE = 2;
+  KEY_TYPE = 3;                   // 直接输入文本（Unicode）
+}
+
+enum ModifierKey {
+  MODIFIER_UNSPECIFIED = 0;
+  MODIFIER_CTRL = 1;
+  MODIFIER_SHIFT = 2;
+  MODIFIER_ALT = 3;
+  MODIFIER_WIN = 4;
+  MODIFIER_ALTGR = 5;
+}
+
+message KeyEvent {
+  KeyAction action = 1;
+  string key = 2;                 // 键名（pyautogui 风格，如 "enter"/"f5"）；KEY_TYPE 时可为空
+  string text = 3;                // KEY_TYPE 的待输入文本（支持 Unicode/中文）
+  repeated ModifierKey modifiers = 4;  // 修饰键集合
+  double timestamp = 5;
+}
+
+// ---------------------------------------------------------------------------
+// 剪贴板
+// ---------------------------------------------------------------------------
+message ClipboardEvent {
+  string text = 1;                // 本块内容（分块时为该块文本）
+  uint32 chunk_index = 2;         // 当前块序号（0 起）
+  uint32 chunk_total = 3;         // 总块数（>=1；单块时为 1）
+  double timestamp = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 流控制
+// ---------------------------------------------------------------------------
+enum StreamCmd {
+  STREAM_CMD_UNSPECIFIED = 0;
+  STREAM_START = 1;
+  STREAM_STOP = 2;
+  STREAM_CONFIG = 3;
+}
+
+message StreamConfig {
+  int32 quality = 1;              // 画质 [MIN,MAX]（0 表示不改）
+  int32 max_fps = 2;
+  int32 min_fps = 3;
+  bool enable_diff = 4;           // 是否启用差分（H.264 路径恒 false）
+  bool enable_compression = 5;    // 是否对未压缩载荷启用 zlib
+}
+
+message StreamControl {
+  StreamCmd cmd = 1;
+  StreamConfig config = 2;        // cmd=CONFIG 时有意义
+}
+
+// ---------------------------------------------------------------------------
+// 心跳
+// ---------------------------------------------------------------------------
+enum HeartbeatKind {
+  HEARTBEAT_UNSPECIFIED = 0;
+  HEARTBEAT_PING = 1;
+  HEARTBEAT_PONG = 2;
+}
+
+message Heartbeat {
+  HeartbeatKind kind = 1;
+  double timestamp = 2;
+}
