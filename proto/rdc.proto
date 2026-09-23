@@ -28,6 +28,7 @@ enum PayloadType {
   PAYLOAD_CLIPBOARD_EVENT = 0x05;     // 双向
   PAYLOAD_STREAM_CONTROL = 0x20;      // C→S
   PAYLOAD_HEARTBEAT = 0x03;           // 双向
+  PAYLOAD_SESSION_JOIN = 0x13;        // C→S（画面通道令牌 + nonce 握手，v5 阶段 4）
 }
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,8 @@ message AuthRequest {
   string client_name = 2;
   // 协议版本（便于日志排查，当前固定 2）
   uint32 protocol_version = 3;
+  // F1 方案 B：客户端 HMAC nonce（32B 随机，TLS 通道内交换，每连接一次）
+  bytes client_nonce = 4;
 }
 
 message AuthResponse {
@@ -50,6 +53,19 @@ message AuthResponse {
   string reason = 3;
   // 服务端协议版本
   uint32 protocol_version = 4;
+  // F1 方案 B：服务端 HMAC nonce（32B 随机，TLS 通道内交换）
+  bytes server_nonce = 5;
+  // F1 方案 B：连接标识（HKDF salt，服务端每连接随机生成）
+  bytes connection_id = 6;
+}
+
+// 画面通道加入（C→S）：凭控制通道发放的一次性令牌 + 独立 nonce 建立第二连接
+message ScreenJoin {
+  string token = 1;
+  bytes client_nonce = 2;
+  uint32 protocol_version = 3;
+  // 回显控制通道下发的 connection_id：证明加入方真实持有该连接的 AuthResponse
+  bytes connection_id = 4;
 }
 
 // ---------------------------------------------------------------------------

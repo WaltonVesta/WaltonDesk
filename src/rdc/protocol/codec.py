@@ -83,6 +83,7 @@ def _key_to_pb(m: M.KeyEvent) -> pb.KeyEvent:
 _ProtoMessage = (
     pb.AuthRequest
     | pb.AuthResponse
+    | pb.ScreenJoin
     | pb.ScreenFrame
     | pb.MouseEvent
     | pb.KeyEvent
@@ -104,10 +105,23 @@ def to_proto(msg: M.Message) -> _ProtoMessage:
                 password=msg.password,
                 client_name=msg.client_name,
                 protocol_version=msg.protocol_version,
+                client_nonce=msg.client_nonce,
             )
         case M.AuthResponse():
             return pb.AuthResponse(
-                ok=msg.ok, token=msg.token, reason=msg.reason, protocol_version=msg.protocol_version
+                ok=msg.ok,
+                token=msg.token,
+                reason=msg.reason,
+                protocol_version=msg.protocol_version,
+                server_nonce=msg.server_nonce,
+                connection_id=msg.connection_id,
+            )
+        case M.ScreenJoin():
+            return pb.ScreenJoin(
+                token=msg.token,
+                client_nonce=msg.client_nonce,
+                protocol_version=msg.protocol_version,
+                connection_id=msg.connection_id,
             )
         case M.ScreenFrame():
             return pb.ScreenFrame(
@@ -208,12 +222,27 @@ def from_payload(pkt_type: int, payload: bytes) -> M.Message:
                     password=p.password,
                     client_name=p.client_name,
                     protocol_version=p.protocol_version,
+                    client_nonce=p.client_nonce,
                 )
             case C.PKT_TYPE_AUTH_RESPONSE:
                 p = pb.AuthResponse()
                 p.ParseFromString(payload)
                 return M.AuthResponse(
-                    ok=p.ok, token=p.token, reason=p.reason, protocol_version=p.protocol_version
+                    ok=p.ok,
+                    token=p.token,
+                    reason=p.reason,
+                    protocol_version=p.protocol_version,
+                    server_nonce=p.server_nonce,
+                    connection_id=p.connection_id,
+                )
+            case C.PKT_TYPE_SESSION_JOIN:
+                p = pb.ScreenJoin()
+                p.ParseFromString(payload)
+                return M.ScreenJoin(
+                    token=p.token,
+                    client_nonce=p.client_nonce,
+                    protocol_version=p.protocol_version,
+                    connection_id=p.connection_id,
                 )
             case C.PKT_TYPE_SCREEN:
                 p = pb.ScreenFrame()

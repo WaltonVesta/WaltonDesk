@@ -14,15 +14,16 @@
 
 ## 版本状态
 
-当前处于 **v4.0.3 → v5.0.0 重构阶段 3**（协议层）。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)。
+当前处于 **v4.0.3 → v5.0.0 重构阶段 4**（传输层）。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)。
 
 ## 协议兼容性
 
 > ⚠️ **v5.0 不与 v4 协议兼容**（2026-09-22 决定）：v1-v4 从未稳定可用、无存量用户，
 > "兼容从未存在过的用户"判定为伪需求。v5 协议为单版本：Protobuf 载荷 +
-> TLS exporter / HKDF 派生的 HMAC-SHA256 帧完整性，握手到数据流统一走 15 字节分帧。
-> v4 遗留的裸 4B 长度前缀握手与 JSON 载荷已随协议层重写移除，
-> 阶段 4 传输层（asyncio + TLS）落地后旧客户端无法连接 v5 服务端，反之亦然。
+> HKDF-SHA256 从 TLS 通道内交换的 nonce 派生会话密钥的 HMAC-SHA256 帧完整性，
+> 握手（认证 + nonce 交换）到数据流统一走 15 字节分帧、协议自描述。
+> v4 遗留的裸 4B 长度前缀握手与 JSON 载荷已移除；阶段 4 传输层（asyncio + TLS 1.2+）
+> 已落地，v4 客户端无法连接 v5 服务端，反之亦然。
 
 ## 开发环境
 

@@ -38,6 +38,8 @@ PKT_TYPE_AUTH: Final[int] = 0x10
 PKT_TYPE_AUTH_RESPONSE: Final[int] = 0x11
 # v5 新增：键盘事件从 CONTROL 拆出独立类型（避免与鼠标共用 Type 后无法分派）
 PKT_TYPE_KEY_EVENT: Final[int] = 0x12
+# v5 阶段 4 新增：画面通道加入帧（一次性令牌 + nonce 握手）
+PKT_TYPE_SESSION_JOIN: Final[int] = 0x13
 PKT_TYPE_STREAM_CONTROL: Final[int] = 0x20
 
 # ---------------------------------------------------------------------------

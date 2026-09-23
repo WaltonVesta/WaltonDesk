@@ -26,6 +26,15 @@ class HmacVerificationError(ProtocolError):
     pass
 
 
+class TlsError(RemoteDesktopError):
+    """TLS 层错误（阶段 4 新增）：握手失败、证书校验被拒、TOFU 用户拒绝等。
+
+    继承 :class:`RemoteDesktopError` 而非内置 ``ssl`` 异常，便于上层用
+    项目统一异常面处理连接安全类失败。
+    """
+    pass
+
+
 class ScreenCaptureError(RemoteDesktopError):
     """屏幕捕获错误"""
     pass

@@ -277,6 +277,9 @@ ignore_missing_imports = true
 #                   rdc.constants（协议常量拆到 protocol/constants 并全注解）、
 #                   rdc.exceptions（全部类已注解；根级残留见下行说明）
 #   TODO(phase-4):  移除 rdc.transport.*（asyncio 重写）
+#   ✅(phase-4):    已移除 rdc.transport.control_channel、
+#                   rdc.transport.screen_channel、rdc.transport.heartbeat、
+#                   rdc.transport.reconnect（asyncio 重写补全注解）
 #   TODO(phase-3/4):移除 rdc.server.service、rdc.server.pid_manager（拆分）
 #   TODO(phase-5):  移除 rdc.capture.*、rdc.encoding.jpeg（向量化 + H.264）
 #   TODO(phase-7):  移除 rdc.input.*（InputBackend 抽象）
@@ -288,12 +291,9 @@ module = [
     # 根级
     "rdc.constants",        # ⚠️ 阶段 4/5 调用点切到 protocol/constants 后整体删除本文件残留常量时移除
     "rdc.config._v4_config",
-    # transport（阶段 4 asyncio 重写）
-    "rdc.transport.control_channel",
-    "rdc.transport.screen_channel",
-    "rdc.transport.heartbeat",
-    "rdc.transport.reconnect",
-    # server（阶段 3-4 拆分为 auth/broadcaster/banlist）
+    # ✅(phase-4): 移除 rdc.transport.{control_channel,screen_channel,heartbeat,reconnect}
+    #   （asyncio 重写完成，全部走全局 strict；新 transport 模块一律不加入本清单）
+    # server（阶段 3-9 拆分为 auth/broadcaster/banlist）
     "rdc.server.service",
     "rdc.server.pid_manager",
     # capture / encoding（阶段 5 重写）

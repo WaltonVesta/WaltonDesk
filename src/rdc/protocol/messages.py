@@ -40,10 +40,19 @@ __all__ = [
     "ModifierKey",
     "PayloadType",
     "ScreenFrame",
+    "ScreenJoin",
     "StreamCmd",
     "StreamConfig",
     "StreamControl",
 ]
+
+_NONCE_SIZE = 32
+
+
+def _check_nonce(value: bytes, name: str) -> None:
+    """nonce 字段语义校验：空串（未提供）或恰好 32 字节，其余拒绝。"""
+    if value and len(value) != _NONCE_SIZE:
+        raise ProtocolError(f"{name} 必须为 {_NONCE_SIZE} 字节或空（未提供），实际 {len(value)}")
 
 
 class PayloadType(IntEnum):
@@ -57,6 +66,7 @@ class PayloadType(IntEnum):
     AUTH_REQUEST = C.PKT_TYPE_AUTH
     AUTH_RESPONSE = C.PKT_TYPE_AUTH_RESPONSE
     KEY_EVENT = C.PKT_TYPE_KEY_EVENT
+    SESSION_JOIN = C.PKT_TYPE_SESSION_JOIN
     STREAM_CONTROL = C.PKT_TYPE_STREAM_CONTROL
 
 
@@ -133,11 +143,19 @@ class HeartbeatKind(IntEnum):
 
 @dataclass(frozen=True)
 class AuthRequest:
-    """认证请求（C→S）。"""
+    """认证请求（C→S）。
+
+    ``client_nonce``：F1 方案 B 的客户端 HMAC nonce（32B 随机，TLS 通道内交换，
+    每连接一次）。默认空字节兼容测试构造；真实握手由 transport 层生成并填充。
+    """
 
     password: str
     client_name: str = ""
     protocol_version: int = C.PROTOCOL_VERSION
+    client_nonce: bytes = b""
+
+    def __post_init__(self) -> None:
+        _check_nonce(self.client_nonce, "client_nonce")
 
     @property
     def payload_type(self) -> PayloadType:
@@ -147,17 +165,54 @@ class AuthRequest:
 
 @dataclass(frozen=True)
 class AuthResponse:
-    """认证响应（S→C）。"""
+    """认证响应（S→C）。
+
+    ``server_nonce`` / ``connection_id``：F1 方案 B 的服务端 nonce 与连接标识
+    （HKDF salt），均 32B 随机、每连接一次。
+    """
 
     ok: bool
     token: str = ""
     reason: str = ""
     protocol_version: int = C.PROTOCOL_VERSION
+    server_nonce: bytes = b""
+    connection_id: bytes = b""
+
+    def __post_init__(self) -> None:
+        _check_nonce(self.server_nonce, "server_nonce")
+        _check_nonce(self.connection_id, "connection_id")
 
     @property
     def payload_type(self) -> PayloadType:
         """返回 AUTH_RESPONSE。"""
         return PayloadType.AUTH_RESPONSE
+
+
+@dataclass(frozen=True)
+class ScreenJoin:
+    """画面通道加入（C→S）：一次性令牌 + 画面通道独立 nonce + 连接标识回显。
+
+    凭控制通道 ``AuthResponse`` 发放的会话令牌连接画面端口：
+    ``connection_id`` 回显控制通道的连接标识（32B 每连接随机值，经 TLS 通道
+    下发，即为令牌绑定证明），``client_nonce`` 与画面端口服务端的
+    server nonce 一起派生画面通道独立 HMAC 密钥（与控制通道密钥不同）。
+    """
+
+    token: str
+    client_nonce: bytes = b""
+    protocol_version: int = C.PROTOCOL_VERSION
+    connection_id: bytes = b""
+
+    def __post_init__(self) -> None:
+        if not self.token:
+            raise ProtocolError("ScreenJoin.token 不能为空")
+        _check_nonce(self.client_nonce, "client_nonce")
+        _check_nonce(self.connection_id, "connection_id")
+
+    @property
+    def payload_type(self) -> PayloadType:
+        """返回 SESSION_JOIN。"""
+        return PayloadType.SESSION_JOIN
 
 
 @dataclass(frozen=True)
@@ -303,6 +358,7 @@ class Heartbeat:
 Message = (
     AuthRequest
     | AuthResponse
+    | ScreenJoin
     | ScreenFrame
     | MouseEvent
     | KeyEvent

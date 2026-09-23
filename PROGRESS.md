@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-23（阶段 3 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 本次阶段 3
+> 最后更新：2026-09-23（阶段 4 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md`（阶段报告）
+> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 阶段 3 → 本次阶段 4
 
 ---
 
@@ -140,11 +140,63 @@ python -m rdc --version → 远程桌面控制 v5.0.0
 
 ---
 
-## 下一步：阶段 4 — 传输层（asyncio + TLS）
+## 阶段 4：传输层（asyncio + TLS + HMAC 会话绑定）— ✅ 完成（详见 STAGE4_REPORT.md）
 
-1. **先决策 F1**（exporter 路径 A/B）→ `transport/tls.py`（SSLContext 强制 TLS1.2+、TOFU、exporter 接入）
-2. `transport/base.py` Channel Protocol → control/screen channel asyncio 重写
-3. **v5 握手改造**：AuthRequest/AuthResponse 即普通帧（协议自描述）；会话建立后 `require_hmac=True` 强制完整性
-4. `session_token.py` + `backpressure.py` + 修复 B3（head-of-line blocking）+ heartbeat/reconnect asyncio 化
-5. 调用点从 `framing.create_json/create_screen` 切 `codec.encode_frame`，删 v4 遗留面
-6. 验收：双进程集成全绿 · 100 并发无泄漏 · 令牌重放必失败 · transport/ ≥85%
+### 子任务状态（对照任务书 §五）
+
+| # | 任务 | 状态 |
+|---|------|------|
+| 4.1 | `transport/base.py`：Channel Protocol + `FrameStream` + `StreamChannel` | ✅ |
+| 4.2 | `control_channel.py` asyncio 重写（TLS + 握手 + 收发协程） | ✅ |
+| 4.3 | `screen_channel.py` asyncio 重写（`ScreenJoin` 帧加入，替代裸 4B 握手） | ✅ |
+| 4.4 | `backpressure.py`：`DropOldestQueue` 满丢最旧 + dropped 计数 | ✅ |
+| 4.5 | `tls.py`：SSLContext 强制 TLS1.2+ + TOFU + 证书生成（自 service 提取） | ✅ |
+| 4.6 | `session_token.py`：`token_urlsafe(32)` + IP/connection_id 绑定 + 60s TTL + 单次使用 | ✅ |
+| 4.7 | `hmac_nonce.py`：**F1 方案 B 落地**（HKDF + nonce 捎带认证帧交换） | ✅ |
+| 4.8 | `reconnect.py` + `heartbeat.py` asyncio 化 | ✅ |
+| 4.9 | 修复 B3：`broadcaster.py` 每客户端独立队列 + 独立发送 task | ✅ |
+| 4.10 | 测试：真实 TLS 端到端、100 并发压测、令牌重放、慢客户端不阻塞 | ✅ |
+| — | `server.py`（TransportServer/会话）：任务书未列但集成与压测必需 | ✅ 补交付 |
+
+### 验收结果（2026-09-23 真实输出）
+
+```
+ruff:   All checks passed!
+mypy:   Success: no issues found in 62 source files
+pytest: 439 passed in 23.54s（新增 140；阶段 3 为 299）
+transport/ 覆盖率: 93.0%（验收线 ≥85%）
+全局覆盖率: 53.0%（阶段 3 为 33.6%）
+100 并发压测: 句柄 234→234（Δ0，两次独立复跑）| RSS Δ3.0/Δ4.5MB（阈值 220MB）
+令牌重放: 集成层第二次 ScreenJoin 必 AuthError ✅
+慢客户端: 20 帧 publish <1s 不被阻塞；快端收 [11..20]；慢端 dropped=10 各计各的 ✅
+python -m rdc --version → 远程桌面控制 v5.0.0
+```
+
+### 📌 阶段 4 关键发现与决定
+
+| # | 内容 |
+|---|------|
+| **D14（扫雷级）** | **`service.py` 不 import transport**（全树 grep 实测；transport 四文件是阶段 1 机械搬迁的孤立副本，唯一消费方在 `legacy_v4/`）。→ 任务书叮嘱 a 担心的"sync→async 桥接 / service 线程模型牵连"**不存在**；`service.py` 本阶段**零改动**。v5 新传输栈自包含，接入真实运行时的点为阶段 9 服务端拆分（用户已确认） |
+| **F1 落地（方案 B）** | HKDF-SHA256(`ikm=client_nonce‖server_nonce`, `salt=connection_id`, `info=b"rdc-hmac-v1"`, 32B)。nonce **捎带在认证帧**（`AuthRequest.client_nonce` 新字段 4 / `AuthResponse.server_nonce=5, connection_id=6`）+ 新 `ScreenJoin` message（`Type=0x13`）——握手仍 1 RTT；TLS 建立失败则握手帧不执行、nonce 交换不启动（叮嘱 c 由调用顺序天然保证）。画面通道独立 nonce 集 → 与控制通道**派生不同密钥**，一条泄露不波及另一条。认证失败路径不发 nonce/不签令牌 |
+| **B3 修复架构** | `transport/broadcaster.py` 独立 asyncio 组件：每订阅者 `DropOldestQueue` + 独立发送 task；慢客户端只丢自己的旧帧。**代价**：每连接独立 HMAC 密钥 ⇒ 帧无法再字节级 zero-copy，每帧每客户端一次序列化+签名（SHA-256 ~GB/s 吞吐，实测开销可忽略；权衡记录 STAGE4 §4）。v4 同步 broadcaster 留阶段 9 删除（真实运行时修复延后，单客户端场景可接受） |
+| **S1-S4 安全收紧** | 随实现落地的额外加固：①降级判定移除 `certificate_verify_failed` 公共错误串匹配（v4 实为"任何校验失败都降级"，与自身注释矛盾）——过期/未知 CA/主机名不符一律不降级；②TOFU 无确认回调时 v4 默认信任 → v5 拒绝；③令牌绑定 `(ip, connection_id)`，绑定不符连原记录作废；④uuid4 令牌 → `secrets.token_urlsafe(32)` |
+| 协议最小扩展 | proto 字段号只增不改 + 重新生成 pb；阶段 3 的 299 测试全保持通过。`exceptions.py` +`TlsError` |
+| mypy 收紧兑现 | 宽松清单移除 transport 四条目（叮嘱 c 已核验：移除后 62 文件 0 error，无隐藏问题暴露） |
+| 测试抓出的实现缺陷 ×2 | ①`recv_message` "坏帧+好帧同段到达"流停摆（pop 消费字节未产出帧时未继续排空缓冲）→ 修复+回归测试；②TLS 降级重建未关旧 socket（句柄泄漏）+ TOFU 拒绝未 `wait_closed` → 两通道修复 |
+
+### 遗留（详见 STAGE4_REPORT §8）
+
+v4 运行时 B3 延阶段 9 · TLS 异常分支覆盖率缺口（control 82.9/screen 80.9，缺口均为
+MITM/断连构造）· 双进程集成以同事件循环双协程+真实 loopback socket 等价替代 ·
+`rdc.constants` 双份与 `create_json/create_screen` 遗留面（阶段 5/9 删）
+
+---
+
+## 下一步：阶段 5 — 采集与编码（全帧 H.264）
+
+1. `capture/source.py` ScreenSource Protocol 注入点 + `monitor.py` 多显示器
+2. `capture/diff.py` 向量化重写（`cv2.absdiff`+reshape 掩码，目标 4K <5ms；v4 现状 8,160 次 Python 循环/帧）+ 修 B4/B5
+3. `encoding/{base,h264,hw_probe,raters,bandwidth}.py`：PyAV libx264 ultrafast/zerolatency/CRF 动态；**全帧不裁剪**（H.264 帧间有状态）；硬编探测**必须实测 `ctx.open()`**
+4. `scripts/bench_{diff,encode}.py` 含 v4 JPEG 基线（已知：libx264 4K=11.2ms、桌面场景降 96%，需补高熵场景）
+5. 与阶段 4 衔接：`broadcaster.publish(ScreenFrame)` 即编码产物投递点，服务端侧背压已就位
+6. 验收：4K 差分 <5ms · 编码 <40ms · 带宽降幅 ≥40%（多场景）· `capture/`+`encoding/` 覆盖率
