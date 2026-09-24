@@ -324,7 +324,14 @@ class ScreenDiffer:
         self._pool: ThreadPoolExecutor | None = None
         self._pool_workers = 0
         self._band_buffers: list[npt.NDArray[np.bool_]] = []
-        self._mask_buffers: list[npt.NDArray[np.uint8]] = []
+        # 分带规划结果（由 _ensure_bands 按当前分辨率填充；在此声明以便
+        # 尚未比较过任何帧时也有确定值，同时满足 mypy strict 的属性声明要求）
+        self._band_starts: list[int] = []
+        self._band_rows: int = 0
+        self._needs_col_pad: bool = False
+        self._pad_buffers: (
+            tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]] | None
+        ) = None
         self._closed = False
 
         # 统计
@@ -468,7 +475,10 @@ class ScreenDiffer:
         self._prev_size = None
         self._grid = (0, 0)
         self._band_buffers = []
-        self._mask_buffers = []
+        self._band_starts = []
+        self._band_rows = 0
+        self._needs_col_pad = False
+        self._pad_buffers = None
         self._ratio_window.clear()
 
     def close(self) -> None:
@@ -644,7 +654,7 @@ class ScreenDiffer:
         bands = self._resolve_bands(width * height, rows)
         self._pool_workers = bands
 
-        band_rows = self._band_rows(rows, bands)
+        band_rows = self._band_row_count(rows, bands)
         starts = list(range(0, rows, band_rows))
         # 每带最多 band_rows*BS 行；末带含不足一块的残行
         self._band_buffers = [
@@ -652,20 +662,17 @@ class ScreenDiffer:
                      dtype=bool)
             for s in starts
         ]
-        self._mask_buffers = [
-            np.zeros(
-                (min(band_rows, rows - s) * self._block_size, cols * self._block_size),
-                dtype=np.uint8,
-            )
-            for s in starts
-        ]
         self._band_starts = starts
         self._band_rows = band_rows
         self._needs_col_pad = width != cols * self._block_size
         if self._needs_col_pad:
-            self._pad_buffer = np.zeros(
-                (height, cols * self._block_size), dtype=np.uint32
+            pad_w = cols * self._block_size
+            self._pad_buffers = (
+                np.zeros((height, pad_w), dtype=np.uint32),
+                np.zeros((height, pad_w), dtype=np.uint32),
             )
+        else:
+            self._pad_buffers = None
 
     def _resolve_bands(self, pixel_count: int, rows: int) -> int:
         """决定带数：显式 ``workers`` 优先，否则按像素数自动。"""
@@ -677,8 +684,13 @@ class ScreenDiffer:
             bands = 1
         return max(1, min(bands, rows))
 
-    def _band_rows(self, rows: int, bands: int) -> int:
-        """每带占多少个块行（向上取整，至少 1）。"""
+    def _band_row_count(self, rows: int, bands: int) -> int:
+        """每带占多少个块行（向上取整，至少 1）。
+
+        注意与实例属性 ``self._band_rows``（每带的块行数）区分：本方法是
+        **规划期**计算，属性是**已定案**的结果，二者在 :meth:`_ensure_bands`
+        中前后相继。
+        """
         return max(1, -(-rows // bands))
 
     # -- 内部：核心向量化差分 ---------------------------------------------------
@@ -721,15 +733,16 @@ class ScreenDiffer:
         previous: npt.NDArray[np.uint32],
         cols: int,
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
-        """把两帧拷进列补齐缓冲并返回（宽度补到 ``cols * block_size``）。"""
-        width = cols * self._block_size
-        height = current.shape[0]
-        buf = self._pad_buffer
-        if buf is None or buf.shape[0] < height or buf.shape[1] != width:
-            buf = np.zeros((height, width), dtype=np.uint32)
-            self._pad_buffer = buf
-        cur_out = np.zeros((height, width), dtype=np.uint32)
-        prev_out = buf
+        """把两帧拷进列补齐缓冲并返回（宽度补到 ``cols * block_size``）。
+
+        缓冲在 :meth:`_ensure_bands` 中一次性分配（含零填充的列边带）；
+        本方法只写入有效像素区，边带恒为 0 且两帧相同 → 不产生假变化，
+        也无需每帧清零。
+        """
+        buffers = self._pad_buffers
+        if buffers is None:  # pragma: no cover - 仅防御 _needs_col_pad 与缓冲不一致
+            raise RuntimeError("列补齐缓冲未初始化")
+        cur_out, prev_out = buffers
         cur_out[:, : current.shape[1]] = current
         prev_out[:, : previous.shape[1]] = previous
         return cur_out, prev_out

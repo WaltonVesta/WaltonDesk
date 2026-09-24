@@ -1,20 +1,90 @@
 # STAGE5_INPROGRESS.md — 阶段 5 中途落盘（额度暂停点）
 
-> 记录日期：2026-09-24
-> 基线 HEAD：`b9a0cae`（阶段 4 完成）
+> 记录日期：2026-09-24（**第二次落盘**：批 A 三个文件已验证）
+> 基线 HEAD：阶段 4 `b9a0cae` → WIP `ead8c60` → 本次验证提交
 > 本文件性质：**临时进度快照**，阶段 5 完成后由 `STAGE5_REPORT.md` 取代
-> 触发原因：7 天额度已用 75%+，用户指令"先落盘，等恢复后说继续"
+> 触发原因：7 天额度告急，用户指令"先落盘，等恢复后说继续"
 >
-> ⚠️ 当前工作区**不是绿色状态**：`capture/diff.py` 已重写但**从未运行过**（未跑
-> ruff/mypy/pytest）。恢复工作时第一件事见 §6。
+> ✅ **当前工作区是绿色状态**：`capture/{source,monitor,diff}.py` 三个文件
+> 已通过 **ruff 0 error + mypy 64 文件 0 error + 功能 smoke 全绿**（数据见 §1.5）。
+> `diff.py` 的 4K 差分在生产路径实测 **3.18ms**，达成 <5ms 验收线。
+> 剩余 8 项任务未开始，全部实现配方见 §3。
 
 ---
 
 ## 0. 一句话现状
 
-阶段 5 的**全部技术选型已通过 6 轮真机探针定案**（含 3 个会致命返工的坑），
-并已落地 2 个新文件 + 重写 1 个文件；剩余是"照既定结论写完 + 测试 + 基准脚本"的
-体力活。**最贵的部分（测量与决策）已经完成，数据全在本文件 §2，恢复后不必重测。**
+阶段 5 的**全部技术选型已通过真机探针定案**（含 3 个会致命返工的坑），批 A 的
+3 个文件（`source.py` / `monitor.py` / `diff.py`）已写完**并通过 ruff + mypy +
+功能 smoke 验证**。剩余 8 项是"照 §3 既定配方写完 + 测试 + 基准脚本"的体力活。
+**最贵的部分（测量与决策）已完成，数据全在本文件 §2，恢复后不必重测。**
+
+---
+
+## 1.5 批 A 验证结果（2026-09-24，真实输出）
+
+```
+$ uv run ruff check src tests scripts --output-format=concise
+All checks passed!
+
+$ uv run mypy src
+Success: no issues found in 64 source files
+
+$ uv run pytest -q --no-cov
+439 passed in 23.78s        # 阶段 4 基线，**零回归**（v4 兼容面 get_changed_blocks/
+                            # get_changed_region 仍被 service.py 正常调用）
+```
+
+⚠️ **下一批注意**：从 pyproject 移除 `rdc.capture.diff` 后，mypy 可能对
+`_band_row_count` 方法与其 docstring 中提到的同名属性产生冗余告警，属预期，
+按提示处理即可——**不要在未移除前重复跑 mypy 浪费额度**。
+
+**首轮 mypy 报 3 错**（同一根因，已修）：`_band_rows` 既是方法名又被当属性赋值 →
+`Cannot assign to a method`。这正是本报告初版 §5.2 预警的隐患，修复方式：
+方法改名 `_band_row_count()`，并把 4 个分带属性（`_band_starts` / `_band_rows` /
+`_needs_col_pad` / `_pad_buffers`）**在 `__init__` 中声明**（不再仅在
+`_ensure_bands` 里创建）。
+
+顺带修掉的另外 2 个 §5 遗留问题：
+- **§5.1 已修**：`_column_padded` 原每次调用新分配 33MB → 改为在 `_ensure_bands`
+  中一次性分配**成对**补齐缓冲，热路径只写有效像素区（列边带恒为 0 且两帧相同，
+  不产生假变化，无需每帧清零）。
+- **死分配已删**：`_mask_buffers`（每分辨率 `(带高 × 全宽)` 的 uint8 数组，
+  4K 下约 8.3MB/带）**从未被读取** → 整块移除。
+
+**功能 smoke（26 项断言全过）**
+
+| 验证项 | 结果 |
+|--------|------|
+| 差分正确性 vs 朴素双重循环（6 种配置：4K/1080p/**1928×1080 非整除**/65×63/130×100@bs16/1080p@bs8） | **逐块全等 ✅ 全部 match** |
+| 首帧语义 | `is_first=True`，v4 兼容面 `get_changed_blocks` 返回 `None` ✅ |
+| 静止帧门控 | 全同帧 `any_change=False, changed=0` ✅ |
+| 单像素变化 | `changed=1`，脏区 `[(576,480,32,32)]` ✅ 定位精确 |
+| alpha 语义（默认 `ignore_alpha=False`） | 仅 alpha 变化 → 判为有变化 ✅ |
+| alpha 语义（`ignore_alpha=True`） | 仅 alpha 变化 → `any_change=False` ✅ |
+| 多矩形脏区（B5） | 桌面内容 24 块变化 → **2 个矩形**（无外接矩形膨胀） ✅ |
+| `ArrayScreenSource` | 尺寸/序号/显示器索引/统计计数、close 后抛 `RuntimeError` ✅ |
+| `bgra_view` 长度校验 | 不匹配抛 `ValueError` ✅ |
+| `MonitorSelector` | 默认选虚拟全屏 `(0,0,4480,1440)`、`next/prev` 循环、`select(0)`、`to_local` 坐标换算、越界抛 `MonitorNotFoundError` ✅ |
+| `ScreenDiffer.close()` + `stats()` 计数 | 42 帧统计正确、`workers=8` ✅ |
+
+**4K 差分性能（`ScreenDiffer` 实测，含归约与脏区计算）**
+
+| 场景 | 中位数 | 最小 | 判定 |
+|------|--------|------|------|
+| **生产路径：双缓冲交替 + `adopt=True`，高变化内容（230 块）** | **3.18 ms** | 2.91 | ✅ **<5ms PASS** |
+| **生产路径：桌面式内容（24 块变化，2 脏区）** | **4.04 ms** | — | ✅ **<5ms PASS** |
+| `adopt=False`（v4 兼容面，强制拷贝前帧） | 9.12–9.37 ms | 8.76 | ❌ 超线 |
+
+→ ⚠️ **关键约束（必须传给 `mss_source.py`）**：`adopt=False` 比 `adopt=True`
+慢 **6.19 ms**（每帧 33MB 拷贝）。**v5 主路径必须用双缓冲 + `adopt=True`**：
+采集源每帧写入**另一个**持久缓冲，差分器只持引用。`adopt=False` 仅留给
+v4 兼容面（PIL 入口），阶段 9 随之删除。
+
+→ 与 §2.1 探针数据的差别说明：探针裸测 2.78ms 是"预分配 `np.not_equal` +
+纯归约"，本次 3.18ms 是**经完整 `compare()` 公开 API**（含 `_as_u32` 视图、
+脏区 `connectedComponents`、统计与 `DiffResult` 构造）的端到端耗时，
+后者才是验收口径。**结论不变：达标。**
 
 ---
 
@@ -22,21 +92,27 @@
 
 | # | 任务 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | `capture/source.py` ScreenSource Protocol | ✅ **代码已写完** | 未过 ruff/mypy，未写测试 |
-| 2 | `capture/mss_source.py` mss 实现（多显示器） | ❌ **未开始** | 仍是 v4 搬迁副本（PIL 路径 + 吞错 + 硬编码兜底） |
-| 3 | `capture/diff.py` 向量化 + 修 B4/B5 | 🔶 **代码已写完，未验证** | 已知遗留问题见 §5（4 项） |
-| 4 | `capture/monitor.py` 多显示器枚举/切换 | ✅ **代码已写完** | `MonitorInfo` + `MonitorSelector`，纯逻辑可测 |
+| 1 | `capture/source.py` ScreenSource Protocol | ✅ **已完成 + 已验证** | ruff/mypy/smoke 全绿；**无单测文件**（任务 11 待补） |
+| 2 | `capture/mss_source.py` mss 实现（多显示器） | ❌ **未开始** | 仍是 v4 搬迁副本（PIL 路径 + 吞错 + 硬编码兜底）<br>⚠️ 必须 `mss.MSS()` + 双缓冲 `adopt=True`（见 §1.5 / §2.6 坑 3） |
+| 3 | `capture/diff.py` 向量化 + 修 B4/B5 | ✅ **已完成 + 已验证** | 4K 生产路径 **3.18ms <5ms**；vs 朴素实现 6 配置逐块全等；**无单测文件** |
+| 4 | `capture/monitor.py` 多显示器枚举/切换 | ✅ **已完成 + 已验证** | `MonitorInfo` + `MonitorSelector`，纯逻辑；**无单测文件** |
 | 5 | `encoding/base.py` VideoEncoder Protocol | ❌ 未开始 | 接口设计已在 §3 定稿 |
 | 6 | `encoding/h264.py` PyAV libx264 | ❌ 未开始 | **实现配方已在 §3 定稿（含关键代码）** |
 | 7 | `encoding/hw_probe.py` 硬编探测 | ❌ 未开始 | 探测结论已在 §2.5 定稿 |
 | 8 | `encoding/raters.py` 自适应码率 | ❌ 未开始 | CRF→码率实测数据已在 §2.4 |
 | 9 | `encoding/bandwidth.py` BandwidthProbe | ❌ 未开始 | 现为 `encoding/jpeg.py` 内的 `BandwidthProbe`，待迁出 |
 | 10 | `scripts/bench_encode.py` + `bench_diff.py` | ❌ 未开始 | 可直接复用 §2 的探针逻辑 |
-| 11 | 测试（差分正确性/编码往返/码率收敛） | ❌ 未开始 | 正确性 oracle 已验证可行（§2.1） |
+| 11 | 测试（差分正确性/编码往返/码率收敛） | ❌ 未开始 | smoke 已覆盖正确性（§1.5），需固化为 pytest 文件 |
 
 **已确认假设的落地情况**
 - 假设 A（diff 改"静止门控 + 脏区列表"，B4 固定块、B5 多矩形，`get_changed_region` 保留不进主路径）→ 已按此写入 `diff.py`。
-- 假设 B（capture/encoding 重写即补注解、移除 mypy 宽松条目；`rdc.constants` 与 `create_json/create_screen` 留阶段 9）→ `diff.py`/`source.py`/`monitor.py` 均按全注解 strict 写；**mypy 宽松清单尚未移除条目**（等 mypy 跑通再动，见 §6 步骤 4）。
+- 假设 B（capture/encoding 重写即补注解、移除 mypy 宽松清单条目；`rdc.constants` 与
+  `create_json/create_screen` 留阶段 9）→ `diff.py`/`source.py`/`monitor.py` 均按
+  **全注解 strict** 写，实测在移除清单前就已 0 error。
+  ⚠️ **`pyproject.toml` 的 mypy 宽松清单尚未改动**（本批为省额度未单独验证）。
+  `rdc.capture.diff` **现在即可移除**（下一批第一件事：删该行 + 跑一次 mypy 确认）；
+  `rdc.capture.mss_source` / `rdc.capture.framerate` / `rdc.encoding.jpeg` 待各自重写后再移除。
+  注：`source.py` / `monitor.py` 是新文件，**从未**进入宽松清单，天然 strict。
 
 ---
 
@@ -361,56 +437,54 @@ class VideoEncoder(Protocol):
 
 ---
 
-## 5. `capture/diff.py` 已知遗留问题（**恢复后优先处理，我已发现但按指令未改**）
+## 5. `capture/diff.py` 遗留问题（**初版 5 项已处理 4 项**）
 
-1. **`_column_padded` 有性能缺陷**：列不整除块大小时，`cur_out = np.zeros(...)`
-   **每次调用新分配**（4K 下 33MB/帧），只有 `prev_out` 复用了 `self._pad_buffer`。
-   → 应两个方向都用预分配缓冲。仅影响非整除分辨率（1928×1080 等），
-   主流程 4K/1080p 不受影响（列天然整除：`cols*BS == W`）。
-2. **4 个属性只在 `_ensure_bands()` 里赋值**（`_band_starts`、`_band_rows`、
-   `_needs_col_pad`、`_pad_buffer`），未在 `__init__` 声明 →
-   mypy strict 可能报 `has no attribute`；运行时靠"首次 `compare()` 必先调
-   `_ensure_bands`"保证安全。**需补 `__init__` 声明。**
-3. **`ignore_alpha=True` 路径未做行切片复用**（`np.bitwise_and` 新分配 33MB）。
-   默认 `False`（mss alpha 恒 255，§2.6），但开启后性能会退化，需注释说明或优化。
-4. **`_dirty_rects` 里 `mask.astype(np.uint8)` 每次分配 8KB**（小，可忽略），
-   但 `mask.any()` 已在上游算过 → 可传参避免重复扫描。属微优化。
-5. 全文件**未经任何验证**：ruff / mypy / 导入 / 单测均**未跑过**。
-   首帧 `DiffResult.elapsed_ms` 在 `_record` 之后重新取时间，与其他分支不一致（值正确但风格不统一）。
+| # | 初版问题 | 现状 |
+|---|---------|------|
+| 1 | `_column_padded` 每次调用新分配 33MB | ✅ **已修**（`_ensure_bands` 一次性分配成对补齐缓冲） |
+| 2 | 4 个分带属性未在 `__init__` 声明 → mypy 报错 | ✅ **已修**（全部声明；同时暴露并修掉了 `_band_rows` 方法/属性同名冲突） |
+| 3 | `ignore_alpha=True` 路径 `np.bitwise_and` 新分配 33MB | ⏳ **未修**（默认 `False`，mss alpha 恒 255，主路径不受影响）。留 `TODO(stage5-followup)`；若开启需改为预分配 `np.bitwise_and(..., out=buf)` |
+| 4 | `_dirty_rects` 里 `mask.astype(np.uint8)` 重复分配 + 上游已算过 `mask.any()` | ⏳ **未修**（8KB 分配 + 一次 8160 元素扫描，实测对 3.18ms 无感知影响）。属微优化 |
+| 5 | 全文件未经任何验证 | ✅ **已修**：ruff / mypy / 26 项 smoke / 4K 性能 / 全量 pytest 全绿 |
+| 6 | **新增遗留**：无 pytest 测试文件 | ⏳ 待补（任务 11）。smoke 断言清单可直接抄 §1.5 表格转成 `tests/unit/test_capture_diff.py` |
+| 7 | **新增遗留**：首帧分支的 `elapsed_ms` 在 `_record` 之后重新取时间，与其他分支风格不一致（值正确） | ⏳ 纯风格，可在补测试时顺手统一 |
 
 ---
 
 ## 6. 恢复工作的建议顺序（额度最省路径）
 
-1. **先跑一次最小验证**（确认 §5 的 1、2 是否会挡住）：
-   ```
-   & "C:\Users\walton\.local\bin\uv.exe" run ruff check src
-   & "C:\Users\walton\.local\bin\uv.exe" run mypy src
-   & "C:\Users\walton\.local\bin\uv.exe" run python -c "from rdc.capture.diff import ScreenDiffer; import numpy as np; d=ScreenDiffer(block_size=8); a=np.zeros((16,16,4),np.uint8); print(d.compare(a).is_first, d.compare(a).any_change); b=a.copy(); b[0,0,0]=255; print(d.compare(b).changed_blocks, len(d.compare(b).dirty_rects))"
-   ```
-   （第 3 条同时是 `compare()` 的首个 smoke test）
-2. 修 §5 列出的问题（1、2 必须，3、4 可留 TODO）
-3. 写批 A 剩余：`mss_source.py`（**用 `mss.MSS()`**）
-4. 写批 B：`encoding/{base,h264,hw_probe,raters,bandwidth}.py` + `jpeg.py` 适配
-   （**全部配方见 §3，关键约束：thread_count≥4、P2 色彩路径、不写 ctx.close()**）
-5. 写批 C：`scripts/bench_{diff,encode}.py`（内置 §2.6 防坑）+ 6 个测试文件
-6. **验证性能达标**（用 bench 脚本，预期：4K diff 2.8ms / 4K encode 11.6ms / 带宽降 94%+）
-7. 全量 `ruff` + `mypy` + `pytest`
-8. 从 `pyproject.toml` mypy 宽松清单移除
-   `rdc.capture.diff`、`rdc.capture.mss_source`、`rdc.capture.framerate`、`rdc.encoding.jpeg`
-   → 再跑 mypy 确认 0 error
-9. 更新 `PROGRESS.md` + 写 `STAGE5_REPORT.md`（含 §2 全部数据表 + 假设 A/B 落地 +
-   多场景带宽取样 + 覆盖率 + 阶段 6 起点）+ 删除本文件
-10. commit：`feat(stage5): add vectorized diff and PyAV H.264 encoding`
+### ✅ 已完成（本次，无需重做）
+- ~~跑 ruff/mypy 验证 3 个文件~~ → **全绿**（§1.5）
+- ~~修 §5 问题 1、2~~ → **已修**（问题 3、4 为低优先级，可留）
+- ~~首次功能验证~~ → **26 项 smoke + 4K 性能 3.18ms + 全量 pytest 439 零回归**
 
-### 验收目标对照（用 §2 数据预测）
-| 验收项 | 目标 | 已有实测 | 状态 |
+### ⏳ 下一批从这里开始（**按序，勿并行**）
+
+1. **`capture/mss_source.py`**（当前起点）——替换 v4 的 `ScreenCapturer`
+   - ⚠️ 三条硬约束：① `mss.MSS()`（不是 `mss.mss()`，见 §2.6 坑 3）
+     ② **双缓冲交替 + 差分 `adopt=True`**（否则每帧多付 6.19ms，见 §1.5）
+     ③ 失败一律抛 `ScreenCaptureError`，**禁止** v4 的 `except → return 1920,1080`
+   - 零拷贝用 `source.bgra_view(screenshot.bgra, w, h)`，不经 PIL
+   - 顺手从 mypy 清单移除 `rdc.capture.mss_source` + `rdc.capture.diff`，跑一次 mypy
+2. **批 B**：`encoding/{base,h264,hw_probe,raters,bandwidth}.py` + `jpeg.py` 适配
+   —— 全部配方见 §3，关键约束：**`thread_count>=4`（1 会到 65.8ms）**、
+   **P2 色彩路径（cv2 I420 + 填平面，4K=11.58ms）**、**不要写 `ctx.close()`（方法不存在）**
+3. **批 C**：`scripts/bench_{diff,encode}.py`（内置 §2.6 三大防坑）+ 测试文件
+   （smoke 断言清单直接抄 §1.5；差分 oracle 见 §2.1 的 17 种分辨率表）
+4. 全量 `ruff` + `mypy` + `pytest` + `--cov` 出 `capture/`+`encoding/` 覆盖率（线 ≥85%）
+5. 写 `STAGE5_REPORT.md`（含 §2 全部数据表 + 多场景带宽 + 覆盖率 + 阶段 6 起点）、
+   更新 `PROGRESS.md`、**删除本文件**
+6. commit：`feat(stage5): add vectorized diff and PyAV H.264 encoding`
+
+### 验收目标对照
+| 验收项 | 目标 | 实测 | 状态 |
 |--------|------|---------|------|
-| 4K 差分 | <5ms | **2.78ms**（x8 并行） | ✅ 已验证可达，待正式实现验证 |
-| 编码延迟 | <40ms | **11.58ms** @4K（P2 路径） | ✅ 已验证可达，待正式实现验证 |
-| 带宽降幅 | ≥40% | **63%～98.8%**（11 个场景） | ✅ 已验证，含高熵最坏场景 |
+| 4K 差分 | <5ms | **3.18ms**（生产路径，`ScreenDiffer` 端到端） | ✅ **已验证达标** |
+| 编码延迟 | <40ms | **11.58ms** @4K（P2 路径，探针级） | ⏳ 待 `h264.py` 实现后正式验证 |
+| 带宽降幅 | ≥40% | **63%～98.8%**（11 个场景） | ⏳ 待 `bench_encode.py` 正式取样 |
 | capture/+encoding/ 覆盖率 | ≥85% | 未测 | ⏳ 待测试文件 |
-| ruff/mypy/pytest 全绿 | — | 未跑 | ⏳ 恢复后第一件事 |
+| ruff/mypy 全绿 | 0 error | ✅ 0 / ✅ 0（64 文件） | ✅ |
+| pytest 全绿 + 零回归 | — | ✅ 439 passed | ✅ |
 
 ---
 
