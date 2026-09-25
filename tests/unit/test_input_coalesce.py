@@ -228,6 +228,13 @@ class TestCadence:
         clock.advance(1 / 30 + 1e-9)
         assert coalescer.next_delay_s(now=clock.now) == 0.0
 
+    def test_poll_emits_when_due(self, coalescer: InputCoalescer, clock: FakeClock) -> None:
+        """到点时 poll 即装配层定时器主路径：出批且消费队列。"""
+        coalescer.feed_key("a", True)
+        clock.advance(1 / 30 + 1e-9)
+        assert len(coalescer.poll(now=clock.now)) == 1
+        assert coalescer.pending_count == 0
+
     def test_set_fps_validation(self, coalescer: InputCoalescer) -> None:
         with pytest.raises(InputControlError):
             coalescer.set_fps(0)
