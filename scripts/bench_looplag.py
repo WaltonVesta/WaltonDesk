@@ -20,6 +20,7 @@ Python 忙等满载下 QTimer p95 仍 1.15ms。
 """
 
 import asyncio
+import contextlib
 import threading
 import time
 
@@ -34,10 +35,8 @@ async def probe(stop: asyncio.Event, delays: list, interval: float) -> None:
     loop = asyncio.get_running_loop()
     while not stop.is_set():
         t0 = loop.time()
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except TimeoutError:
-            pass
         delays.append((time.perf_counter() - t0 - interval) * 1000)
 
 

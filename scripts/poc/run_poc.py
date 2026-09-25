@@ -10,6 +10,7 @@ CPython 默认把 SIGBREAK 转成 KeyboardInterrupt，与被测异常路径一�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -36,10 +37,8 @@ def run_mode(script: str, mode: str) -> dict:
         if " " in line:
             head, _, rest = line.partition(" ")
             if head.isupper():
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     tags[head] = json.loads(rest)
-                except json.JSONDecodeError:
-                    pass
     if proc.returncode != 0:
         tags["_rc"] = proc.returncode
         tags["_stderr_tail"] = proc.stderr[-800:]
@@ -80,10 +79,8 @@ def run_live(script: str) -> dict:
     for out_line in proc.stdout.read().splitlines():
         if out_line.startswith("CLEAN_EXIT"):
             clean = True
-            try:
+            with contextlib.suppress(Exception):  # 解析失败不致命：clean 已判定
                 threads_left = json.loads(out_line.partition(" ")[2]).get("threads_left")
-            except Exception:  # noqa: BLE001, PERF203
-                pass
     return {
         "ok": clean and rc in (0, 1) and dur <= 3.0,
         "exit_secs": round(dur, 2),
