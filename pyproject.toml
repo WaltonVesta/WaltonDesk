@@ -182,6 +182,9 @@ ignore = [
 # 缩短逐包构造/解析路径中高频字段前缀，提升往返代码可读性。
 "src/rdc/protocol/**" = ["N812"]
 "tests/unit/test_protocol_*.py" = ["N812"]
+# N815：Qt Signal 成员按 Qt 惯例必须 camelCase（与 Qt 文档/示例一致；
+# 改 snake_case 反而破坏生态一致性，且信号连接按名反射查找）。
+"src/rdc/ui/**" = ["N815"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["rdc"]
