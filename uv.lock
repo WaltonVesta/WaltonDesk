@@ -2564,6 +2564,15 @@ wheels = [
 ]
 
 [[package]]
+name = "qasync"
+version = "0.28.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/b2/5be08597dbbf331edb69478eae2f8dd511834cebf56a183b442e7437f8e0/qasync-0.28.0.tar.gz", hash = "sha256:6f7f1f18971f59cb259b107218269ba56e3ad475ec456e54714b426a6e30b71d", size = 14010, upload-time = "2025-08-28T01:31:36.785Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/84/0ce4cd946f6e958428c87d5accac35df70f81607e45ba4919947d0762d63/qasync-0.28.0-py3-none-any.whl", hash = "sha256:21faba8d047c717008378f5ac29ea58c32a8128528629e4afd57c59b768dba0f", size = 16188, upload-time = "2025-08-28T01:31:35.591Z" },
+]
+
+[[package]]
 name = "rdc"
 version = "5.0.0"
 source = { editable = "." }
@@ -2582,6 +2591,7 @@ dependencies = [
     { name = "pynput" },
     { name = "pyperclip" },
     { name = "pyside6" },
+    { name = "qasync" },
     { name = "structlog" },
 ]
 
@@ -2644,6 +2654,7 @@ requires-dist = [
     { name = "pyobjc-framework-security", marker = "sys_platform == 'darwin' and extra == 'macos-secrets'", specifier = ">=10.0" },
     { name = "pyperclip", specifier = ">=1.9" },
     { name = "pyside6", specifier = ">=6.8" },
+    { name = "qasync", specifier = ">=0.28" },
     { name = "secretstorage", marker = "sys_platform == 'linux' and extra == 'linux-secrets'", specifier = ">=3.3" },
     { name = "sounddevice", marker = "extra == 'audio'", specifier = ">=0.5" },
     { name = "structlog", specifier = ">=24.4" },

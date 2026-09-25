@@ -1,0 +1,79 @@
+{
+  "A-qasync": {
+    "timer": {
+      "TIMER": {
+        "count": 1964,
+        "median_ms": 0.999,
+        "p95_ms": 1.222,
+        "max_ms": 10.639,
+        "lost_ms": 49.8
+      }
+    },
+    "mixed": {
+      "MIXED": {
+        "rounds": 46,
+        "rtt_median_ms": 1.25,
+        "timer_under_contention": {
+          "count": 2300,
+          "median_ms": 1.0,
+          "p95_ms": 1.142,
+          "max_ms": 12.91,
+          "lost_ms": 44.4
+        }
+      }
+    },
+    "exc": {
+      "EXC": {
+        "direct": "EXC-DIRECT-SENTINEL",
+        "unhandled_to_handler": [
+          "Task exception was never retrieved|RuntimeError:EXC-UNHANDLED-SENTINEL"
+        ],
+        "future": "EXC-DIRECT-SENTINEL"
+      }
+    },
+    "live": {
+      "ok": true,
+      "exit_secs": 0.03,
+      "rc": 0,
+      "threads_left": 0,
+      "clean_exit_marker": true
+    }
+  },
+  "B-threadloop": {
+    "timer": {
+      "TIMER": {
+        "count": 1966,
+        "median_ms": 1.0,
+        "p95_ms": 1.226,
+        "max_ms": 2.18,
+        "lost_ms": 28.1
+      }
+    },
+    "mixed": {
+      "MIXED": {
+        "rounds": 46,
+        "rtt_median_ms": 3.27,
+        "timer_under_contention": {
+          "count": 765,
+          "median_ms": 1.025,
+          "p95_ms": 10.955,
+          "max_ms": 32.593,
+          "lost_ms": 1507.8
+        }
+      }
+    },
+    "exc": {
+      "EXC": {
+        "xthread_reraised_in_main": "ValueError:EXC-XTREAD-SENTINEL",
+        "slot_caught": true
+      }
+    },
+    "live": {
+      "ok": true,
+      "exit_secs": 0.06,
+      "rc": 0,
+      "threads_left": 0,
+      "clean_exit_marker": true
+    }
+  }
+}

@@ -58,6 +58,7 @@ dependencies = [
     "pydantic>=2.9",
     "protobuf>=5.28",
     "psutil>=6.0",
+    "qasync>=0.28",
 ]
 
 [project.optional-dependencies]
