@@ -305,11 +305,11 @@ module = [
     # ✅(phase-6): 移除 rdc.capture.framerate（v5 重写补全注解）
     # client（阶段 1 补注解后移除）
     "rdc.client.ratelimit",
-    # input（阶段 7 InputBackend 抽象）
-    "rdc.input.mouse",
-    "rdc.input.keyboard",
-    "rdc.input.dpi",
-    "rdc.input.modifiers",
+    # ✅(phase-7): 移除 rdc.input.{mouse,keyboard,dpi,modifiers}
+    #   （v4 四件已删除：mouse/keyboard 语义并入 InputBackend 实现 +
+    #    legacy_pyautogui 回退；DPIAdapter/ModifierState 无 v5 消费方，
+    #    多显示器坐标由 ScreenRect/GetSystemMetrics 承担，修饰键记账由
+    #    后端 _pressed_keys/_pressed_buttons 承担。git 历史可查原实现。）
     # host（阶段 7/10 PlatformAdapter 抽象）
     "rdc.host.autostart",
     "rdc.host.power",

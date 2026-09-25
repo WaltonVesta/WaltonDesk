@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-25（阶段 6 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → 阶段 1 → 阶段 2 → 阶段 3 → 阶段 4 → 阶段 5 → 阶段 6（`1752a08` PoC → … → `103d2e3`）
+> 最后更新：2026-09-30（阶段 7 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md`（阶段报告）
+> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → 批F 收口）
 
 ---
 
@@ -270,13 +270,61 @@ UI 覆盖率: 90.3%（--cov=src/rdc/ui，验收线 ≥70%；framerate 100%、pip
 
 ---
 
-## 下一步：阶段 7 — 输入层
+## 阶段 7：输入层（Windows 优先）— ✅ 完成（详见 STAGE7_REPORT.md）
 
-1. `input/base.py` InputBackend Protocol（mouse/key/text/多显示器）+ `windows.py`
-   SendInput(ctypes，本机可验) + macos/linux（CI/用户验）；v4 `input/*.py` 四件重写
-   补注解后移出 mypy 宽松清单；
-2. `coalesce.py` 事件流合并 + 帧对齐：消费 pipeline `FrameDecision`（fps/delay_s）与
-   ScreenView `mouseMoved` 载荷（`move / press:btn / release:btn / wheel:dir` 远端绝对坐标）；
-3. UI→controller 的 `send_mouse/send_key` 契约已定（MainWindow 走 Protocol，阶段 9
-   装配层实现——UI 零改动）；
-4. IME/pynput 回调边界：回调只进队列，触控件一律 Signal。
+**范围调整（2026-09-30 用户决定）**：只做 Windows 输入层；macOS/Linux
+（`macos.py`/`linux_x11.py`/`linux_wayland.py`）留**空实现**——全方法抛
+`NotImplementedError` + `supported()=False`，各配契约测试；将来补实现只换
+方法体，`InputBackend` Protocol 与上层零改动。理由：主用 Windows、非 Windows
+本机不可测、发布目标未定、保留扩展性、Windows 路径 100% 本机可验（无需 mock）。
+
+### 子任务状态（对照任务书 §六，含范围调整）
+
+| # | 任务 | 状态 |
+|---|------|------|
+| 7.1 | `input/base.py`：InputBackend Protocol + `MouseButton`/`ScreenRect`（虚拟桌面负原点）+ `normalize_key_name`（X11/Qt 三风格归一，值域=v4 KEY_MAP）+ `default_backend` 工厂（空实现/依赖缺失自动回退 legacy） | ✅ |
+| 7.2 | `input/windows.py`：ctypes SendInput（结构体布局测试锁定 x64=40B）、绝对坐标 0–65535 归一化+VIRTUALDESK、KEYEVENTF_UNICODE（代理对、`\n`→VK_RETURN）、VK 表+扩展标志、VkKeyScanW 兜底（需 Shift 拒绝→type_text）、reset 记账 | ✅ |
+| 7.3 | `macos.py` / `linux_x11.py` / `linux_wayland.py` 空实现（+Wayland 会话探测；docstring 固化未来实现要点与许可证注意） | ✅ |
+| 7.4 | `input/legacy_pyautogui.py`：v4 mouse+keyboard 注入合并为协议实现（剔监听侧与 50ms 防抖；吞错→InputControlError；补 reset） | ✅ |
+| 7.5 | `input/coalesce.py`：移动末值合并、节拍 `max(画面fps, 30)` 消费 FrameDecision（鸭子协议）、ScreenView 载荷解析、排队不丢+max_pending 背压、文本拼接、poll/drain 分离、单调 seq | ✅ |
+| 7.6 | 剪贴板（Windows）：扩展 `ui/clipboard_sync.py`（决策点 2）——image/files 载荷、两级检测（廉价轮询+dataChanged 全量确认）、urls>image>text、读回基线防回环；MainWindow `clipboard_{image,files}_from_remote` 协议扩展 | ✅ |
+| 7.7 | IME：ScreenView `textCommitted`（仅候选窗提交串，物理键一律 keyEvent 保阶段 6 基线）+ viewport eventFilter（InputMethod 事件无冒泡，探针实证）+ `input/keys.py`（Qt 键码→规范名）+ `send_text` 契约（决策点 3） | ✅ |
+| 7.8 | 测试：Windows 输入单测（SendInput 边界打桩断言结构体，决策点 1 不打真机）+ base 契约 + coalesce 假时钟全确定 + 空实现 NotImplementedError 逐方法断言 + legacy 契约复用 | ✅ |
+| 7.9 | 收口：v4 `input/{mouse,keyboard,dpi,modifiers}.py` 删除（零引用核验）、mypy 宽松清单 `rdc.input.*` 清零 | ✅ |
+
+### 验收结果（2026-09-30 真实输出）
+
+```
+ruff:   All checks passed!（src + tests）
+mypy:   Success: no issues found in 91 source files
+        （宽松清单兑现 TODO(phase-7)：rdc.input.* 四条目随文件删除清零；
+        新 input/* 与批 E UI 件全 strict 零豁免）
+pytest: 1137 passed in 36.95s（基线 821 → +316，零回归）
+input/ 覆盖率: TOTAL 95.5%（验收线 ≥70%）
+  base/coalesce/keys/macos/linux_x11/linux_wayland 100% · legacy 94.3%
+  · windows 88.3%（缺口=真实 Win32 边界 send/bounds/scan，按决策点 1 不打桩）
+真机手动验证清单：STAGE7_REPORT §6（装配完成后一次性走查）
+```
+
+### 关键发现（详见 STAGE7_REPORT §4）
+
+- PySide6 6.11 绑定四陷阱（探针实测固化）：QInputMethodEvent 两参构造填
+  preedit 非 commit；InputMethod 事件无冒泡必须 viewport 过滤器；
+  QImage.save/bytes(QByteArray) 存根与运行时错位；offscreen 空剪贴板
+  mimeData() 返 None。Qt 剪贴板进程级全局——测试 fixture 必先 clear()。
+- 批 E 初稿曾把可打印键改走文本通道，被阶段 6 基线测试抓住回滚（D35：
+  物理键一律 keyEvent，仅 IME 提交串走 textCommitted）。
+
+---
+
+## 下一步：阶段 8 — 文件传输 + 音频（可选，20-26h）
+
+1. `file_transfer.py`：1MB 分块 + SHA-256 + 断点续传（协议 `ClipboardEvent`
+   分帧已就绪，剪贴板图片/文件字节的出站通道即接此处）；
+2. `transfer_dialog.py`：拖拽 UI + 进度 + 暂停/续传（复用 D26 非模态+Future 模式）；
+3. **路径穿越防护**：目标路径规范化 + 沙箱根校验（阶段 9 渗透清单前置）；
+4. `audio.py`：sounddevice + Opus（实测 libopus 可用）+ 播放 + 开关
+   （本机无声卡 → mock 回环 + 用户手动验证）；
+5. 阶段 7 遗留归阶段 9 装配：controller 实现 `send_mouse/send_key/send_text`、
+   剪贴板三类双向接线、coalesce 挂 pipeline 节拍（`sync_to_frame`）、
+   `default_backend` 构造与 `reset` 挂断连路径、Windows 真机走查（STAGE7 §6）。
