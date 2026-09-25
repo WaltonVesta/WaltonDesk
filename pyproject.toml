@@ -245,6 +245,7 @@ module = [
     "google.protobuf.*",
     "PIL.*",
     "pystray.*",
+    "qasync",  # 0.28.0 无 py.typed / stubs（site-packages 实测）
     # macOS 专有：input/dpi.py 中按平台条件导入，Windows/Linux 上不存在
     "objc",
     "objc.*",

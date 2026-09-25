@@ -1,0 +1,127 @@
+/* 深色主题 QSS（阶段 6.2）。
+   占位符（形如 token 前缀 + 名字）由 rdc.ui.app.load_stylesheet() 用
+   string.Template + tokens.TOKENS 渲染（CSS 块语法自带花括号，故禁用 str.format）。 */
+
+QWidget {
+    background: $bg;
+    color: $text;
+    font-family: "$font_family";
+    font-size: ${font_size}pt;
+}
+
+QMainWindow, QDialog {
+    background: $bg;
+}
+
+/* ---- 按钮 ---- */
+QPushButton {
+    background: $bg_input;
+    border: 1px solid $border;
+    border-radius: ${radius}px;
+    padding: ${spacing}px ${spacing_lg}px;
+    min-height: 18px;
+}
+QPushButton:hover { background: $bg_hover; border-color: $text_disabled; }
+QPushButton:pressed { background: $bg_selected; }
+QPushButton:disabled { color: $text_disabled; background: $bg_alt; }
+QPushButton/default {
+    background: $accent;
+    color: $bg;
+    border-color: $accent;
+    font-weight: 600;
+}
+QPushButton/default:hover { background: $border_focus; }
+
+/* ---- 输入 ---- */
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {
+    background: $bg_input;
+    border: 1px solid $border;
+    border-radius: ${radius}px;
+    padding: ${spacing}px;
+    selection-background-color: $bg_selected;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color: $border_focus; }
+QLineEdit:disabled { color: $text_disabled; }
+QComboBox::drop-down { border: none; width: 20px; }
+
+/* ---- 标签 ---- */
+QLabel { background: transparent; }
+QLabel[dim="true"] { color: $text_dim; }
+
+/* ---- 分组/框架 ---- */
+QGroupBox {
+    border: 1px solid $border;
+    border-radius: ${radius}px;
+    margin-top: 10px;
+    padding-top: 6px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: ${spacing}px;
+    color: $text_dim;
+}
+
+/* ---- 选项卡 ---- */
+QTabBar::tab {
+    background: transparent;
+    color: $text_dim;
+    padding: ${spacing}px ${spacing_lg}px;
+    border-bottom: 2px solid transparent;
+}
+QTabBar::tab:selected { color: $text; border-bottom-color: $accent; }
+QTabBar::tab:hover { color: $text; }
+
+/* ---- 状态栏 / 工具栏 ---- */
+QStatusBar { background: $bg_alt; color: $text_dim; }
+QToolBar { background: $bg_alt; border: none; spacing: ${spacing}px; }
+QToolButton {
+    background: transparent;
+    border-radius: ${radius}px;
+    padding: ${spacing}px;
+}
+QToolButton:hover { background: $bg_hover; }
+QToolButton:checked { background: $bg_selected; }
+QToolButton:disabled { color: $text_disabled; }
+
+/* ---- 进度条（性能面板带宽使用率）---- */
+QProgressBar {
+    background: $bg_input;
+    border: 1px solid $border;
+    border-radius: ${radius}px;
+    text-align: center;
+    color: $text_dim;
+}
+QProgressBar::chunk { background: $accent; border-radius: ${radius}px; }
+
+/* ---- 列表/树 ---- */
+QListWidget, QTreeView {
+    background: $bg_input;
+    border: 1px solid $border;
+    outline: none;
+}
+QListWidget::item:selected, QTreeView::item:selected { background: $bg_selected; }
+QListWidget::item:hover, QTreeView::item:hover { background: $bg_hover; }
+
+/* ---- 复选/单选 ---- */
+QCheckBox, QRadioButton { background: transparent; spacing: ${spacing}px; }
+QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; }
+
+/* ---- 菜单（托盘/启动器）---- */
+QMenu {
+    background: $bg_alt;
+    border: 1px solid $border;
+    border-radius: ${radius}px;
+    padding: 4px;
+}
+QMenu::item:selected { background: $bg_selected; }
+QMenu::separator { height: 1px; background: $border; margin: 4px 8px; }
+
+/* ---- 滚动条 ---- */
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: $bg_selected; border-radius: 4px; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: $text_disabled; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: $bg_selected; border-radius: 4px; min-width: 24px; }
+
+QSizeGrip { background: transparent; }
