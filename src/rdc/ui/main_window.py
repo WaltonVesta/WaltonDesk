@@ -104,6 +104,10 @@ class ClientController(Protocol):
         """转发按键（Qt key code → 阶段 7 映射）。"""
         ...
 
+    def send_text(self, text: str) -> None:
+        """转发已上屏文本（IME 提交串 → InputBackend.type_text，阶段 7 批 E）。"""
+        ...
+
 
 class ClientEvents(Protocol):
     """controller → UI 事件回调协议（GUI 线程调用）。"""
@@ -125,6 +129,14 @@ class ClientEvents(Protocol):
     ) -> None: ...
 
     def clipboard_from_remote(self, text: str) -> None: ...
+
+    def clipboard_image_from_remote(self, image: QImage) -> None:
+        """远端图片写入本地剪贴板（批 E 扩展；阶段 9 实现）。"""
+        ...
+
+    def clipboard_files_from_remote(self, paths: list[str]) -> None:
+        """远端文件清单写入本地剪贴板（内容经阶段 8 通道；批 E）。"""
+        ...
 
 
 class MainWindow(QMainWindow):
@@ -180,6 +192,7 @@ class MainWindow(QMainWindow):
         # 画面输入 → controller
         self.screen_view.mouseMoved.connect(self._on_mouse)
         self.screen_view.keyEvent.connect(self._on_key)
+        self.screen_view.textCommitted.connect(self._on_text)
 
         # 快捷键（v4 保留：F11 全屏、Ctrl+Alt+P 性能面板、Esc 退全屏）
         sc_full = QShortcut(QKeySequence(Qt.Key.Key_F11), self)
@@ -193,6 +206,8 @@ class MainWindow(QMainWindow):
         self.clipboard = ClipboardSync()
         self.clipboard.set_enabled(self._settings.enable_clipboard)
         self.clipboard.localChanged.connect(self._on_local_clipboard)
+        self.clipboard.localImageChanged.connect(self._on_local_clipboard_image)
+        self.clipboard.localFilesChanged.connect(self._on_local_clipboard_files)
 
         if self._controller is not None:
             self._controller.set_events(self)
@@ -286,6 +301,18 @@ class MainWindow(QMainWindow):
         if self._settings.enable_clipboard:
             self.clipboard.apply_remote(text)
 
+    def clipboard_image_from_remote(self, image: QImage) -> None:
+        """ClientEvents：远端剪贴板图片写入本地（批 E）。"""
+        ensure_gui_thread("MainWindow.clipboard_image_from_remote")
+        if self._settings.enable_clipboard:
+            self.clipboard.apply_remote_image(image)
+
+    def clipboard_files_from_remote(self, paths: list[str]) -> None:
+        """ClientEvents：远端剪贴板文件清单写入本地（批 E）。"""
+        ensure_gui_thread("MainWindow.clipboard_files_from_remote")
+        if self._settings.enable_clipboard:
+            self.clipboard.apply_remote_files(paths)
+
     # -- 动作路由 ---------------------------------------------------------------
 
     async def _start_connect(self, host: str, port: int) -> None:
@@ -351,9 +378,22 @@ class MainWindow(QMainWindow):
         if self._controller is not None:
             self._controller.send_key(qt_key, press)
 
+    def _on_text(self, text: str) -> None:
+        """IME/可打印文本提交 → controller.send_text（无 controller 时 no-op）。"""
+        if self._controller is not None:
+            self._controller.send_text(text)
+
     def _on_local_clipboard(self, text: str) -> None:
         # 阶段 9 接 controller.send_clipboard；此处仅计数观测
         _LOG.debug("clipboard_local_change", length=len(text))
+
+    def _on_local_clipboard_image(self, image: QImage) -> None:
+        """本地图片变更观测（批 E；阶段 9 接 controller 出站编码）。"""
+        _LOG.debug("clipboard_local_image", width=image.width(), height=image.height())
+
+    def _on_local_clipboard_files(self, paths: list[str]) -> None:
+        """本地文件清单变更观测（批 E；内容传输归阶段 8 通道）。"""
+        _LOG.debug("clipboard_local_files", count=len(paths))
 
     # -- 对话框/视图编排 -----------------------------------------------------------
 

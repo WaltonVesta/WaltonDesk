@@ -82,6 +82,7 @@ class FakeController:
         self.disconnect_calls = 0
         self.mice: list[tuple[str, int, int]] = []
         self.keys: list[tuple[int, bool]] = []
+        self.texts: list[str] = []
         self.control_flags: list[bool] = []
         self.fail_connect = False
         self.get_password_calls: list[str] = []
@@ -114,6 +115,9 @@ class FakeController:
 
     def send_key(self, qt_key: int, press: bool) -> None:
         self.keys.append((qt_key, press))
+
+    def send_text(self, text: str) -> None:
+        self.texts.append(text)
 
 
 # ---------------------------------------------------------------------------

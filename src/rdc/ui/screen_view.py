@@ -1,4 +1,4 @@
-"""远端画面视图（阶段 6.6，v4 gui/screen_widget.py 迁移）。
+"""远端画面视图（阶段 6.6，v4 gui/screen_widget.py 迁移；阶段 7 批 E 扩展 IME）。
 
 架构：QGraphicsView + QGraphicsPixmapItem。场景坐标系 = **远端虚拟桌面
 绝对坐标**（多显示器含负原点，帧自带 left/top），控件→远端坐标变换因此
@@ -11,12 +11,21 @@ QImage 经 :meth:`present_image` 投来（qasync 同线程直调合法）。
 后按下/移动/滚轮/按键转成远端坐标 Signal 发回 main_window → controller。
 v4 病灶不迁移：其坐标换算把"视图缩放因子"手算进除法且忽略负原点屏，
 本实现用 QGraphicsView 场景变换矩阵，天然覆盖缩放/滚动/负原点。
+
+键盘双通道（批 E，阶段 7 决策点 3"发送侧不破坏 IME、接收侧不模拟 IME"）：
+- **物理按键一律** :attr:`keyEvent`（Qt 键码，与阶段 6 基线完全一致）——
+  装配层经 :func:`rdc.input.keys.qt_key_to_name` 映射为规范键名注入，
+  远端键盘布局与远端 IME 行为由被控端自然决定；
+- **IME 候选窗提交串**（控制端本地输入法"已上屏"文本）→ :attr:`textCommitted`
+  ——装配层映射到 ``InputBackend.type_text``（KEYEVENTF_UNICODE），保证
+  "控制端上屏什么，远端出什么"，不受远端布局/IME 二次劫持。
+候选窗组合态（preedit）由控制端本地 IME 自理，**永不进协议**。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
+from PySide6.QtGui import QImage, QInputMethodEvent, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QWidget
 
 from rdc.ui.app import ensure_gui_thread
@@ -31,7 +40,8 @@ class ScreenView(QGraphicsView):
         mouseMoved(str, int, int): (action, 远端绝对 x, y)。action ∈
             ``move`` / ``press:left|right|middle`` / ``release:...`` /
             ``wheel:up|down``。
-        keyEvent(int, bool): (Qt key, is_press)。
+        keyEvent(int, bool): (Qt key, is_press)。全部物理按键（阶段 6 基线）。
+        textCommitted(str): IME 候选窗提交的已上屏文本（批 E 新增通道）。
         fitModeChanged(bool): 适应窗口开关（main_window 记忆用）。
 
     线程红线：所有方法仅 GUI 线程调用（qasync 主线程协程直调合法）。
@@ -39,6 +49,7 @@ class ScreenView(QGraphicsView):
 
     mouseMoved = Signal(str, int, int)
     keyEvent = Signal(int, bool)
+    textCommitted = Signal(str)
     fitModeChanged = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -66,6 +77,8 @@ class ScreenView(QGraphicsView):
         self._remote_origin = QPointF(0, 0)  # 帧在虚拟桌面的 (left, top)
         self._remote_size: tuple[int, int] | None = None
         self._placeholder = True
+        #: IME 提交事件落在 viewport（焦点代理），输入方法事件无冒泡，必须过滤。
+        self.viewport().installEventFilter(self)
 
     # -- 帧呈现 ---------------------------------------------------------------
 
@@ -186,6 +199,32 @@ class ScreenView(QGraphicsView):
             event.accept()
             return
         super().keyReleaseEvent(event)
+
+    def inputMethodEvent(self, event: QInputMethodEvent) -> None:  # noqa: N802
+        """IME 提交（commit 非空即"已上屏"）→ 文本通道；组合态不外发。
+
+        控制端本地候选窗由 Qt/系统 IME 自理（preedit 段丢弃），仅 commit
+        串转发远端——阶段 7 决策点 3 的"接收侧不模拟 IME"口径。生产环境
+        输入方法事件落在 viewport（焦点代理），由 :meth:`eventFilter`
+        截获；本覆写覆盖直接投递到 view 的路径（单测/内嵌场景）。
+        """
+        if self._input_enabled and event.commitString():
+            self.textCommitted.emit(event.commitString())
+            event.accept()
+            return
+        super().inputMethodEvent(event)
+
+    def eventFilter(self, obj: object, event: object) -> bool:  # noqa: N802
+        """viewport 上截获 IME 提交（输入方法事件无冒泡，必须过滤器）。"""
+        if (
+            obj is self.viewport()
+            and isinstance(event, QInputMethodEvent)
+            and self._input_enabled
+            and event.commitString()
+        ):
+            self.textCommitted.emit(event.commitString())
+            return True
+        return super().eventFilter(obj, event)  # type: ignore[arg-type]
 
     # -- 内部 ---------------------------------------------------------------------
 
