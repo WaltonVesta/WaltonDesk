@@ -24,13 +24,13 @@ QPushButton {
 QPushButton:hover { background: $bg_hover; border-color: $text_disabled; }
 QPushButton:pressed { background: $bg_selected; }
 QPushButton:disabled { color: $text_disabled; background: $bg_alt; }
-QPushButton/default {
+QPushButton:default {
     background: $accent;
     color: $bg;
     border-color: $accent;
     font-weight: 600;
 }
-QPushButton/default:hover { background: $border_focus; }
+QPushButton:default:hover { background: $border_focus; }
 
 /* ---- 输入 ---- */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {
