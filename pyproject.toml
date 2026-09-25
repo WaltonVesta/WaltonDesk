@@ -139,9 +139,8 @@ include = ["src/rdc", "tests", "scripts", "proto", "README.md", "CHANGELOG.md"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests", "scripts"]
-# legacy_v4/ 是待重写的 Tkinter 参考代码（阶段 6 后删除）；pb/ 是 protoc 生成物
+# pb/ 是 protoc 生成物（legacy_v4/ 已于阶段 6 删除）
 extend-exclude = [
-    "legacy_v4",
     "src/rdc/protocol/pb",
     ".venv",
     "build",
@@ -221,7 +220,6 @@ pretty = true
 # 禁止裸 ignore：必须带错误码（REFACTOR_PLAN 风险 R3 缓解措施）
 enable_error_code = ["ignore-without-code", "redundant-self", "truthy-bool"]
 exclude = [
-    "^legacy_v4/",
     "^src/rdc/protocol/pb/",
     "^build/",
     "^dist/",
@@ -372,8 +370,8 @@ parallel = true
 omit = [
     "src/rdc/protocol/pb/*",  # protoc 生成物
     "src/rdc/__main__.py",
-    # TODO(phase-4/6): v4 兼容遗留层。个人版策略下不再扩展（2026-09-22 决定），
-    # 调用点在阶段 4/6 重写时逐个换成 Settings，届时随 legacy_v4/ 一并删除。
+    # TODO(phase-9): v4 兼容遗留层。个人版策略下不再扩展（2026-09-22 决定）；
+    # 唯一消费方 service.py（v4 运行时）阶段 9 拆除时本文件一并删除。
     "src/rdc/config/_v4_config.py",
 ]
 
@@ -407,7 +405,7 @@ source = ["src/rdc"]
 # bandit —— 阶段 9 验收 0 high
 # ============================================================================
 [tool.bandit]
-exclude_dirs = ["legacy_v4", "tests", "src/rdc/protocol/pb", "build", "dist"]
+exclude_dirs = ["tests", "src/rdc/protocol/pb", "build", "dist"]
 # ✅(phase-3): 原 B324 跳过（framing MD5）已随 v5 重写移除 ——
 # create_screen 校验字段改用 SHA-256（usedforsecurity=False），src/ 内无 MD5 残留。
 skips = []
