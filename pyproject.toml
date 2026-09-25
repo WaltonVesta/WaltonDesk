@@ -284,7 +284,7 @@ ignore_missing_imports = true
 #   TODO(phase-3/4):移除 rdc.server.service、rdc.server.pid_manager（拆分）
 #   ✅(phase-5):    已移除 rdc.capture.diff、rdc.capture.mss_source、
 #                   rdc.encoding.jpeg（向量化差分 + mss 源 + H.264/协议化 JPEG 重写补注解）
-#                   rdc.capture.framerate **保留**（未重写，阶段 6 处理）
+#   ✅(phase-6):    已移除 rdc.capture.framerate（v5 重写为纯决策器，capture 宽松条目清零）
 #   TODO(phase-7):  移除 rdc.input.*（InputBackend 抽象）
 #                   移除 rdc.host.*（PlatformAdapter 抽象）
 #   TODO(phase-9):  移除 rdc.security.fingerprint（安全加固）
@@ -300,8 +300,7 @@ module = [
     "rdc.server.service",
     "rdc.server.pid_manager",
     # ✅(phase-5): 移除 rdc.capture.{diff,mss_source}、rdc.encoding.jpeg
-    #   （阶段 5 重写补全注解；capture.framerate 未重写，继续宽松）
-    "rdc.capture.framerate",
+    # ✅(phase-6): 移除 rdc.capture.framerate（v5 重写补全注解）
     # client（阶段 1 补注解后移除）
     "rdc.client.ratelimit",
     # input（阶段 7 InputBackend 抽象）

@@ -71,6 +71,28 @@ DEFAULT_KEYFRAME_INTERVAL_SEC: Final = 2.0
 DEFAULT_FPS: Final = 30.0
 
 
+def _hardware_options(codec_name: str, crf: int, preset: str) -> dict[str, str]:
+    """硬件编码器的 AVDictionary 选项映射（保守最小集）。
+
+    nvenc/qsv/amf 的选项命名与 x264 **不互通**（nvenc 的 preset 是 p1-p7，
+    无 ``crf`` 键，对应概念是 ``rc``/``max_bitrate``/``quality``）。本机三类
+    硬件 ``open()`` 全部失败（阶段 5 实测），任何映射都无法真机验证——
+    故此处刻意**不发明参数**：gop/尺寸/线程走 AVCodecContext 字段（与实现
+    无关），质量档留给 FFmpeg 默认。⚠️ 硬编真正启用（CI 或有卡机器）时，
+    本函数连同 ``H264Encoder.set_quality`` 需按编码器逐个标定（阶段 10 跟进）。
+
+    Args:
+        codec_name: 硬件编码器名（信息用途，日志/未来分支）。
+        crf: 期望质量（当前未映射，保留签名以便扩展）。
+        preset: 期望 preset（当前未映射）。
+
+    Returns:
+        选项字典（当前恒为空）。
+    """
+    _ = codec_name, crf, preset
+    return {}
+
+
 class H264Encoder(VideoEncoder):
     """libx264 编码器（ultrafast + zerolatency，全帧 H.264）。
 
@@ -107,16 +129,22 @@ class H264Encoder(VideoEncoder):
         keyframe_interval_sec: float = DEFAULT_KEYFRAME_INTERVAL_SEC,
         thread_count: int = 0,
         preset: str = "ultrafast",
+        codec_name: str = "libx264",
     ) -> None:
         if width <= 0 or height <= 0:
             raise ValueError(f"编码尺寸非法: {width}x{height}")
         if fps <= 0:
             raise ValueError(f"fps 必须 >0，实得 {fps}")
+        if not codec_name:
+            raise ValueError("codec_name 不能为空")
         self._width = width
         self._height = height
         self._crf = max(CRF_RANGE[0], min(CRF_RANGE[1], crf))
         self._fps = fps
         self._preset = preset
+        #: 编码实现名（libx264 或 hw_probe.best_encoder() 的硬件名）。
+        #: 硬编选项集与 x264 不同（无 crf/preset 同名键），_open_codec 按名分支。
+        self._codec_name = codec_name
         self._gop = max(1, int(round(keyframe_interval_sec * fps)))
         # 硬约束 2：显式下限 4；0（auto）也钳到 4，保证跨机器延迟可预期
         self._threads = max(_MIN_THREADS, thread_count)
@@ -260,28 +288,41 @@ class H264Encoder(VideoEncoder):
     # -- 内部 -------------------------------------------------------------------
 
     def _open_codec(self) -> None:
-        """创建并打开 libx264 上下文（构造即 open，失败抛 RuntimeError）。"""
-        ctx = av.CodecContext.create("libx264", "w")
+        """创建并打开编码上下文（构造即 open，失败抛 RuntimeError）。
+
+        ``codec_name == "libx264"`` 走阶段 5 已实测的 x264 参数组；其余
+        （hw_probe 选出的硬件名）走 :func:`_hardware_options` 的通用映射。
+        注意 hw_probe 教训：选项错误只会在 ``open()`` 时暴露，因此
+        失败信息必须带编码器名，供调用方（pipeline）回退 libx264。
+        """
+        # ctx 标注 Any：av 存根对 create() 的 overload 只在字面量编码名时返回
+        # VideoCodecContext；本类支持动态 codec_name（hw_probe 选型），落到
+        # str 分支的基类声明缺 width/pix_fmt 等属性（阶段 5 D13 同类口径）。
+        ctx: Any = av.CodecContext.create(self._codec_name, "w")
         ctx.width = self._width
         ctx.height = self._height
         ctx.pix_fmt = "yuv420p"
         ctx.gop_size = self._gop
         ctx.thread_count = self._threads  # 硬约束 2
-        ctx.options = {
-            "preset": self._preset,
-            "tune": "zerolatency",
-            "crf": str(self._crf),
-        }
+        if self._codec_name == "libx264":
+            ctx.options = {
+                "preset": self._preset,
+                "tune": "zerolatency",
+                "crf": str(self._crf),
+            }
+        else:
+            ctx.options = _hardware_options(self._codec_name, self._crf, self._preset)
         try:
             ctx.open()
         except Exception as exc:
             raise RuntimeError(
-                f"libx264 打开失败 ({self._width}x{self._height}): {exc}"
+                f"{self._codec_name} 打开失败 ({self._width}x{self._height}): {exc}"
             ) from exc
         self._ctx = ctx
         self._pending_rebuild = False
         _LOG.debug(
             "H.264 编码器就绪",
+            codec=self._codec_name,
             width=self._width,
             height=self._height,
             crf=self._crf,
