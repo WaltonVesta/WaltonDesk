@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-23（阶段 4 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 阶段 3 → 本次阶段 4
+> 最后更新：2026-09-25（阶段 5 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md`（阶段报告）
+> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 阶段 3 → 阶段 4（`b9a0cae`）→ 阶段 5
 
 ---
 
@@ -192,11 +192,56 @@ MITM/断连构造）· 双进程集成以同事件循环双协程+真实 loopbac
 
 ---
 
-## 下一步：阶段 5 — 采集与编码（全帧 H.264）
+## 阶段 5：采集与编码（全帧 H.264）— ✅ 完成（详见 STAGE5_REPORT.md）
 
-1. `capture/source.py` ScreenSource Protocol 注入点 + `monitor.py` 多显示器
-2. `capture/diff.py` 向量化重写（`cv2.absdiff`+reshape 掩码，目标 4K <5ms；v4 现状 8,160 次 Python 循环/帧）+ 修 B4/B5
-3. `encoding/{base,h264,hw_probe,raters,bandwidth}.py`：PyAV libx264 ultrafast/zerolatency/CRF 动态；**全帧不裁剪**（H.264 帧间有状态）；硬编探测**必须实测 `ctx.open()`**
-4. `scripts/bench_{diff,encode}.py` 含 v4 JPEG 基线（已知：libx264 4K=11.2ms、桌面场景降 96%，需补高熵场景）
-5. 与阶段 4 衔接：`broadcaster.publish(ScreenFrame)` 即编码产物投递点，服务端侧背压已就位
-6. 验收：4K 差分 <5ms · 编码 <40ms · 带宽降幅 ≥40%（多场景）· `capture/`+`encoding/` 覆盖率
+11 项任务全部交付：`capture/{source,mss_source,diff,monitor}.py` 重写/新建 +
+`encoding/{base,h264,hw_probe,raters,bandwidth}.py` + `jpeg.py` 协议化适配（决策 A
+构造注入）+ 2 个 bench 脚本 + 11 个测试文件 + 契约测试套件（H264/JPEG 同跑）。
+2026-09-24 因额度暂停于批 A（source/monitor/diff 已验证），本次按
+STAGE5_INPROGRESS.md §6 恢复续完，全程未重测探针数据。
+
+### 验收结果（2026-09-25 真实输出）
+
+```
+ruff:   All checks passed!（src + tests + scripts）
+mypy:   Success: no issues found in 69 source files（宽松清单移除
+        rdc.capture.{diff,mss_source} + rdc.encoding.jpeg，仅留 framerate）
+pytest: 695 passed（基线 439 → 新增 256，零回归；v4 兼容面实测未破）
+覆盖率: capture/+encoding/ TOTAL 93.0%（验收线 ≥85%；剔除未重写的 v4
+        framerate.py 后阶段 5 新文件约 96%，source/bandwidth/hw_probe 100%）
+
+bench_diff.py（生产路径 双缓冲+adopt=True，iters=50）：
+  4K high-change 3.59ms / 4K desktop 3.54ms / 1080p 1.57ms（验收线 <5ms）✅
+bench_encode.py（ultrafast+zerolatency+crf28，iters=24）：
+  4K static/moving 19.99/19.90ms · 1080p 5.5-6.6ms · 真实屏幕 4.53ms（<40ms）✅
+  （最坏参考·信息项：4K 纯随机噪声 47.8ms 超线；断言口径为真实屏幕内容，
+    高熵内容的正解是 raters 降分辨率档——详见 STAGE5_REPORT §3.2）
+  带宽降幅 vs JPEG q60：94.9/95.8/97.2/94.0/97.3% + 噪声最坏 64.1% +
+  真实屏幕 86.5%（验收线 ≥40%）✅
+```
+
+### 三条硬约束落地（mss_source.py）
+
+① `mss.MSS()`（绝不用废弃 `mss.mss()`，测试锁死）；② 双缓冲交替 +
+`adopt=True`（否则每帧多付 6.19ms；测试断言第 3 帧不覆盖第 2 帧缓冲）；
+③ 失败一律 `ScreenCaptureError`（删 v4 兜底；v4 行为由同文件兼容外壳
+`ScreenCapturer` 保留，阶段 9 删）。
+
+### 三个致命坑（数据固化在 STAGE5_REPORT §4）
+
+`thread_count=1` → 4K 编码 65.8ms 破线（已钳 ≥4）；mss 废弃 API ×
+pytest filterwarnings=error；测量陷阱（内容合成混计时→假 71.67ms、
+BGRA 当 RGB 比→假 PSNR 15dB）。
+
+---
+
+## 下一步：阶段 6 — 服务端广播管线与帧率自适应
+
+1. `capture/framerate.py` 重写（消费 `DiffResult.change_ratio`/`dirty_rects`
+   与 `RaterSignals`），完成后移出 mypy 宽松清单最后一条 capture 条目；
+2. 广播管线串联：`MssScreenSource`（双缓冲）→ `ScreenDiffer.compare(adopt=True)`
+   静止门控 → `H264Encoder`（`hw_probe.best_encoder()` 选型）→
+   `broadcaster.publish(ScreenFrame)`（阶段 4 背压已就位）；`AdaptiveRater`
+   接心跳 RTT/丢包与 `DropOldestQueue.dropped`；
+3. GUI（PySide6）与输入注入（阶段 7 前置）按需排期；
+4. v4 运行时（`server/service.py` 及其 capture/encoding 兼容面）统一阶段 9 拆除。
