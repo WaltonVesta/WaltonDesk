@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-25（阶段 5 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → `5082762` 阶段 1 → 阶段 2 → 阶段 3 → 阶段 4（`b9a0cae`）→ 阶段 5
+> 最后更新：2026-09-25（阶段 6 ✅ 完成）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md`（阶段报告）
+> 提交历史：`dfe2281` v4 基线 → 阶段 1 → 阶段 2 → 阶段 3 → 阶段 4 → 阶段 5 → 阶段 6（`1752a08` PoC → … → `103d2e3`）
 
 ---
 
@@ -235,13 +235,48 @@ BGRA 当 RGB 比→假 PSNR 15dB）。
 
 ---
 
-## 下一步：阶段 6 — 服务端广播管线与帧率自适应
+## 阶段 6：UI 迁移 PySide6 + 广播管线 — ✅ 完成（详见 STAGE6_REPORT.md）
 
-1. `capture/framerate.py` 重写（消费 `DiffResult.change_ratio`/`dirty_rects`
-   与 `RaterSignals`），完成后移出 mypy 宽松清单最后一条 capture 条目；
-2. 广播管线串联：`MssScreenSource`（双缓冲）→ `ScreenDiffer.compare(adopt=True)`
-   静止门控 → `H264Encoder`（`hw_probe.best_encoder()` 选型）→
-   `broadcaster.publish(ScreenFrame)`（阶段 4 背压已就位）；`AdaptiveRater`
-   接心跳 RTT/丢包与 `DropOldestQueue.dropped`；
-3. GUI（PySide6）与输入注入（阶段 7 前置）按需排期；
-4. v4 运行时（`server/service.py` 及其 capture/encoding 兼容面）统一阶段 9 拆除。
+五批连续执行（用户预授权）：批 A 高风险地基（PoC 桥接双轨实测 → framerate 重写 →
+pipeline 串联）/ 批 B UI 骨架+低风险件 / 批 C 可视件 / 批 D 主窗口+对话框 / 批 E 收口。
+
+### 验收结果（2026-09-25 真实输出）
+
+```
+ruff:   All checks passed!（src + tests + scripts）
+mypy:   Success: no issues found in 87 source files（宽松清单 capture 条目清零：
+        兑现 framerate 重写 TODO；qasync 入 ignore_missing_imports，无 py.typed 实测）
+pytest: 821 passed in 32.72s（基线 695 → 新增 126，零回归）
+UI 覆盖率: 90.3%（--cov=src/rdc/ui，验收线 ≥70%；framerate 100%、pipeline 92.5%）
+冷启动: median 441.5ms <1500ms ✅（独立子进程×5，lazy-import 未触发）
+跨线程红线: ensure_gui_thread 守卫 + 测试断言（worker 触达必抛 RuntimeError；
+        pipeline publish==主线程 / encode==worker 线程且单一）✅
+```
+
+### 关键结论
+
+- **桥接选型 = qasync 0.28.0（BSD-2-Clause 合规，PoC 四判据全过，scripts/poc 固化）**；
+  核心发现：loop-in-thread **不防 GIL 争用**（忙等下 Qt 定时器 p95 11–16ms vs
+  qasync 1.15ms）。⚠️ 3.16 风险：qasync 用 asyncio.iscoroutinefunction（已弃用），
+  届时切方案乙（PoC 代码现成），测试豁免已注释登记。
+- **GIL 释放实测成立 → executor 无需进程池**（bench_looplag.py：worker 连续编码/差分
+  时主线程 1ms 定时器 p95 2–3.8ms）。测量陷阱：Windows 时钟粒度 15.6ms 地板，
+  须 timeBeginPeriod(1) + 每用例独立进程。
+- **B2 根治**：非模态对话框 + asyncio.Future（v4 after+Event 缝合整类拆除）；
+  密码超时→取消、指纹超时→拒绝。
+- **h264 新增 codec_name 注入**（hw_probe 落地路径）；硬编选项空映射不发明参数（D24）。
+- **legacy_v4/ 删除**（独立提交 `05cf5da`）：45 文件 7,505 行，零引用核查后删除，
+  git 历史可恢复。service.py 的 gui.tray 降级段按 D14 归阶段 9（本阶段不碰）。
+
+---
+
+## 下一步：阶段 7 — 输入层
+
+1. `input/base.py` InputBackend Protocol（mouse/key/text/多显示器）+ `windows.py`
+   SendInput(ctypes，本机可验) + macos/linux（CI/用户验）；v4 `input/*.py` 四件重写
+   补注解后移出 mypy 宽松清单；
+2. `coalesce.py` 事件流合并 + 帧对齐：消费 pipeline `FrameDecision`（fps/delay_s）与
+   ScreenView `mouseMoved` 载荷（`move / press:btn / release:btn / wheel:dir` 远端绝对坐标）；
+3. UI→controller 的 `send_mouse/send_key` 契约已定（MainWindow 走 Protocol，阶段 9
+   装配层实现——UI 零改动）；
+4. IME/pynput 回调边界：回调只进队列，触控件一律 Signal。
