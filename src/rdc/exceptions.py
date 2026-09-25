@@ -45,6 +45,11 @@ class InputControlError(RemoteDesktopError):
     pass
 
 
+class PlatformUnsupportedError(RemoteDesktopError):
+    """当前平台缺少可用实现（阶段 7 新增：输入后端空实现/依赖缺失）。"""
+    pass
+
+
 class ServiceError(RemoteDesktopError):
     """服务管理错误"""
     pass
