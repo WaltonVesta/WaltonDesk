@@ -340,14 +340,22 @@ def _build_legacy() -> InputBackend:
 
     静态 import 会让 ``import rdc.input.base`` 在 pyautogui 缺失的机器上直接
     失败——而契约层本身与平台无关，不应被回退实现的依赖牵连。
+
+    Raises:
+        PlatformUnsupportedError: pyautogui 未安装（回退路径本身不可用）。
+        InputControlError: 模块存在但工厂缺失或产物不符契约。
     """
     import importlib
 
-    module = importlib.import_module("rdc.input.legacy_pyautogui")
-    factory = getattr(module, "build_legacy_backend", None)
-    if factory is None:  # pragma: no cover - 结构性防护
-        raise InputControlError("回退后端缺少工厂函数 build_legacy_backend")
-    backend: InputBackend = factory()
+    try:
+        module = importlib.import_module("rdc.input.legacy_pyautogui")
+        factory = getattr(module, "build_legacy_backend", None)
+        if factory is None:  # pragma: no cover - 结构性防护
+            raise InputControlError("回退后端缺少工厂函数 build_legacy_backend")
+        backend: InputBackend = factory()
+    except ImportError as exc:
+        _LOG.warning("pyautogui 回退后端不可用", error=str(exc))
+        raise PlatformUnsupportedError(f"pyautogui 回退后端不可用: {exc}") from exc
     return backend
 
 
