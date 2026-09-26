@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-30（阶段 7 ✅ 完成）
+> 最后更新：2026-09-26（阶段 7 ✅ 完成）
 > 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → 批F 收口）
+> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）
 
 ---
 
@@ -272,7 +272,7 @@ UI 覆盖率: 90.3%（--cov=src/rdc/ui，验收线 ≥70%；framerate 100%、pip
 
 ## 阶段 7：输入层（Windows 优先）— ✅ 完成（详见 STAGE7_REPORT.md）
 
-**范围调整（2026-09-30 用户决定）**：只做 Windows 输入层；macOS/Linux
+**范围调整（2026-09-26 用户决定）**：只做 Windows 输入层；macOS/Linux
 （`macos.py`/`linux_x11.py`/`linux_wayland.py`）留**空实现**——全方法抛
 `NotImplementedError` + `supported()=False`，各配契约测试；将来补实现只换
 方法体，`InputBackend` Protocol 与上层零改动。理由：主用 Windows、非 Windows
@@ -292,7 +292,7 @@ UI 覆盖率: 90.3%（--cov=src/rdc/ui，验收线 ≥70%；framerate 100%、pip
 | 7.8 | 测试：Windows 输入单测（SendInput 边界打桩断言结构体，决策点 1 不打真机）+ base 契约 + coalesce 假时钟全确定 + 空实现 NotImplementedError 逐方法断言 + legacy 契约复用 | ✅ |
 | 7.9 | 收口：v4 `input/{mouse,keyboard,dpi,modifiers}.py` 删除（零引用核验）、mypy 宽松清单 `rdc.input.*` 清零 | ✅ |
 
-### 验收结果（2026-09-30 真实输出）
+### 验收结果（2026-09-26 真实输出）
 
 ```
 ruff:   All checks passed!（src + tests）

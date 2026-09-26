@@ -1,12 +1,12 @@
 # STAGE7_REPORT.md — 阶段 7：输入层（Windows 优先）✅ 完成
 
-> 完成日期：2026-09-30
-> 基线 HEAD：`bd7c7d1`（阶段 6 完成）→ 本阶段 6 个提交（批 A~F）
+> 完成日期：2026-09-26
+> 基线 HEAD：`bd7c7d1`（阶段 6 完成）→ 本阶段 7 个提交（批 A~F + 批 F 补测）
 > 验收：**ruff All checks passed · mypy Success（91 files，宽松清单 input 条目清零）· pytest 1137 passed（阶段 6 基线 821 → +316，零回归）· input/ 覆盖率 95.5%（验收线 ≥70%）**
 
 ---
 
-## 0. 范围（用户 2026-09-30 决策）
+## 0. 范围（用户 2026-09-26 决策）
 
 **Windows 优先 + macOS/Linux 空实现**。理由：主用 Windows、macOS/Linux 本机
 不可测、发布目标未定、保留 `InputBackend` Protocol 扩展性。补 macOS/Linux
