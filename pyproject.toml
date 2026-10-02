@@ -290,6 +290,8 @@ ignore_missing_imports = true
 #   TODO(phase-7):  移除 rdc.input.*（InputBackend 抽象）
 #                   移除 rdc.host.*（PlatformAdapter 抽象）
 #   TODO(phase-9):  移除 rdc.security.fingerprint（安全加固）
+#                   ✅(phase-9): 已移除——fingerprint 加固重写（异常收窄+
+#                   原子写+全量注解），清单条目同步删除
 #   TODO(phase-1):  rdc.client.ratelimit 为纯算法模块，阶段 1 补注解后即可移除
 [[tool.mypy.overrides]]
 module = [
@@ -315,7 +317,8 @@ module = [
     "rdc.host.power",
     "rdc.host.netinfo",
     # security（阶段 9 加固）
-    "rdc.security.fingerprint",
+    # ✅(phase-9): 移除 rdc.security.fingerprint（加固重写：异常收窄、
+    #   原子写、structlog、全量注解，全局 strict 实测 0 error）
 ]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

@@ -104,6 +104,10 @@ class Settings(BaseModel):
     auth_ban_duration: int = 300
     # --- TLS ---
     tls_cert_generated: int = 0
+    # 用户证书（阶段 9.3）：两者均非空且校验通过 → 服务端用用户证书替代自签名；
+    # 任一路径为空视为未启用（自签名路径，ensure_server_cert 兜底）。
+    tls_cert_path: str = ""
+    tls_key_path: str = ""
     # --- IP 过滤 ---
     enable_whitelist: bool = False
     whitelist_ips: list[str] = Field(default_factory=list)
