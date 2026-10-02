@@ -12,6 +12,7 @@ from pathlib import Path
 
 __all__ = [
     "APP_DIR_NAME",
+    "banlist_file",
     "cert_dir",
     "config_dir",
     "config_file",
@@ -57,6 +58,11 @@ def config_file() -> Path:
 def history_file() -> Path:
     """连接历史文件路径 ``history.json``。"""
     return config_dir() / "history.json"
+
+
+def banlist_file() -> Path:
+    """认证封禁持久化文件路径 ``banlist.json``（阶段 9 ``server/banlist`` 落盘处）。"""
+    return config_dir() / "banlist.json"
 
 
 def log_dir() -> Path:
