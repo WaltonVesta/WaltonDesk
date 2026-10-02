@@ -73,6 +73,9 @@ class Settings(BaseModel):
     # --- 网络 ---
     port: int = 9999
     control_port: int = 9998
+    #: 画面端口 = 控制端口 + 本偏移（主控端由 control_port 推导画面端口，
+    #: 与被控端 ``HostService`` 的 ``control_port``/``port`` 约定解耦配置漂移）。
+    screen_port_offset: int = 1
     # 被控端监听地址（阶段 9）：默认全部网卡（远程桌面产品语义）；
     # 收紧示例：127.0.0.1（本机调试）/ 指定内网地址。
     bind_host: str = "0.0.0.0"

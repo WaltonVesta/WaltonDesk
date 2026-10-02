@@ -217,7 +217,13 @@ class ScreenJoin:
 
 @dataclass(frozen=True)
 class ScreenFrame:
-    """一帧画面（S→C）。``data`` 为编码后的压缩字节。"""
+    """一帧画面（S→C）。``data`` 为编码后的压缩字节。
+
+    ``origin_x/origin_y``（阶段 9 批 4）：帧在**虚拟桌面坐标系**中的原点，
+    多显示器副屏为负值。主控端据此把解码帧摆到场景正确位置，输入坐标
+    反算（:meth:`rdc.ui.screen_view.remote_pos`）与远端注入才互逆；默认
+    ``0`` 兼容旧载荷（protobuf 数值零值不上线，字节快照向后兼容）。
+    """
 
     seq: int
     timestamp: float
@@ -226,6 +232,8 @@ class ScreenFrame:
     codec: Codec
     data: bytes
     keyframe: bool = False
+    origin_x: int = 0
+    origin_y: int = 0
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:

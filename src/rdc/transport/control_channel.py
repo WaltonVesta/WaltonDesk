@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import ssl
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from rdc.exceptions import TlsError
 from rdc.logging import get_logger
@@ -28,7 +29,7 @@ from rdc.transport.tls import (
     build_client_ssl_context,
     is_self_signed_error,
     tls_hostname,
-    verify_peer_trust,
+    verify_peer_trust_async,
 )
 
 __all__ = ["ControlChannel"]
@@ -38,7 +39,18 @@ _LOG = get_logger("transport.control")
 #: TCP 建连 + TLS + 认证握手的整体超时（秒，v4 单步 5s×N 收敛为一个总闸）。
 CONNECT_TIMEOUT = 10.0
 
-FingerprintConfirm = Callable[[str, str], bool]
+#: 指纹确认回调：同步返回 bool，或返回 awaitable（UI 非模态对话框，D26）。
+FingerprintConfirm = Callable[[str, str], "bool | Awaitable[bool]"]
+
+#: 口令提供回调：同步返回 str，或返回 awaitable（UI 弹窗索取）。
+PasswordProvider = Callable[[], "str | Awaitable[str]"]
+
+
+async def _resolve(value: str | Awaitable[str]) -> str:
+    """awaitable 感知的取值（同步 provider 零开销兼容）。"""
+    if inspect.isawaitable(value):
+        return str(await value)
+    return value
 
 
 class ControlChannel(StreamChannel):
@@ -58,7 +70,7 @@ class ControlChannel(StreamChannel):
         host: str,
         port: int,
         *,
-        password_provider: Callable[[], str],
+        password_provider: PasswordProvider,
         fingerprint_confirm: FingerprintConfirm | None = None,
         client_name: str = "",
     ) -> None:
@@ -66,10 +78,12 @@ class ControlChannel(StreamChannel):
         Args:
             host: 被控端地址（IPv4/IPv6/主机名）。
             port: 控制端口。
-            password_provider: 口令提供回调（阶段 6 前为同步回调，保持传输层
-                零 GUI 依赖；调用发生在 :meth:`connect` 内）。
-            fingerprint_confirm: 自签名证书 TOFU 首连确认回调；``None`` 时
-                首连拒绝（v4"默认信任"降级在 v5 视为不安全，禁止静默放行）。
+            password_provider: 口令提供回调，同步返回 str 或返回 awaitable
+                （阶段 9 批 4：UI 非模态口令框是协程，D26）；调用发生在
+                :meth:`connect` 内，传输层保持零 GUI 依赖。
+            fingerprint_confirm: 自签名证书 TOFU 首连确认回调（可同步可异步）；
+                ``None`` 时首连拒绝（v4"默认信任"降级在 v5 视为不安全，禁止
+                静默放行）。
             client_name: 客户端自我标识（审计/日志）。
         """
         super().__init__()
@@ -102,10 +116,11 @@ class ControlChannel(StreamChannel):
         )
         try:
             stream = await self._upgrade_tls(reader, writer)
+            password = await _resolve(self._password_provider())
             result = await asyncio.wait_for(
                 perform_control_handshake(
                     stream,
-                    password=self._password_provider(),
+                    password=password,
                     client_name=self._client_name,
                 ),
                 timeout=CONNECT_TIMEOUT,
@@ -157,7 +172,7 @@ class ControlChannel(StreamChannel):
                 writer.close()
                 raise TlsError(f"TLS 降级重握手失败: {exc}") from exc
             try:
-                verify_peer_trust(
+                await verify_peer_trust_async(
                     writer.get_extra_info("ssl_object"),
                     self._host,
                     confirm=self._fingerprint_confirm,

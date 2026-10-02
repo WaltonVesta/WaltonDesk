@@ -278,6 +278,8 @@ class ScreenPipeline:
             codec=encoder.codec,
             data=encoded.data,
             keyframe=encoded.is_keyframe,
+            origin_x=frame.left,
+            origin_y=frame.top,
         )
         self._seq += 1
         return msg, decision

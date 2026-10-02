@@ -21,25 +21,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ssl
-from collections.abc import Callable
 
 from rdc.exceptions import TlsError
 from rdc.logging import get_logger
 from rdc.transport.base import FrameStream, StreamChannel
-from rdc.transport.control_channel import CONNECT_TIMEOUT
+from rdc.transport.control_channel import CONNECT_TIMEOUT, FingerprintConfirm
 from rdc.transport.handshake import perform_screen_join
 from rdc.transport.tls import (
     build_client_ssl_context,
     is_self_signed_error,
     tls_hostname,
-    verify_peer_trust,
+    verify_peer_trust_async,
 )
 
 __all__ = ["ScreenChannel"]
 
 _LOG = get_logger("transport.screen")
-
-FingerprintConfirm = Callable[[str, str], bool]
 
 
 class ScreenChannel(StreamChannel):
@@ -144,7 +141,7 @@ class ScreenChannel(StreamChannel):
                 writer.close()
                 raise TlsError(f"画面通道 TLS 降级重握手失败: {exc}") from exc
             try:
-                verify_peer_trust(
+                await verify_peer_trust_async(
                     writer.get_extra_info("ssl_object"),
                     self._host,
                     confirm=self._fingerprint_confirm,

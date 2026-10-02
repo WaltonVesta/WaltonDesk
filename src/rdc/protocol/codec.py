@@ -132,6 +132,8 @@ def to_proto(msg: M.Message) -> _ProtoMessage:
                 codec=_pb_enum(pb.Codec, int(msg.codec)),
                 keyframe=msg.keyframe,
                 data=msg.data,
+                origin_x=msg.origin_x,
+                origin_y=msg.origin_y,
             )
         case M.MouseEvent():
             return _mouse_to_pb(msg)
@@ -256,6 +258,8 @@ def from_payload(pkt_type: int, payload: bytes) -> M.Message:
                     codec=codec,
                     data=p.data,
                     keyframe=p.keyframe,
+                    origin_x=p.origin_x,  # 旧载荷缺字段 → proto3 默认 0
+                    origin_y=p.origin_y,
                 )
             case C.PKT_TYPE_CONTROL:
                 p = pb.MouseEvent()

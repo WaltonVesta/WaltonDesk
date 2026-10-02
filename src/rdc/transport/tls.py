@@ -22,8 +22,9 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import ssl
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Final
 
@@ -44,6 +45,7 @@ __all__ = [
     "is_self_signed_error",
     "tls_hostname",
     "verify_peer_trust",
+    "verify_peer_trust_async",
 ]
 
 _LOGGER = get_logger("transport.tls")
@@ -245,6 +247,41 @@ def verify_peer_trust(
         raise TlsError(f"首次连接需确认证书指纹但未提供确认回调：{fingerprint} ({host})")
     _LOGGER.info("tls_fingerprint_first_use", fingerprint=fingerprint, host=host)
     if confirm(fingerprint, host):
+        fp_manager.trust(fingerprint, host)
+        return fingerprint
+    raise TlsError("用户拒绝证书指纹，连接中止")
+
+
+async def verify_peer_trust_async(
+    ssl_object: ssl.SSLObject | None,
+    host: str,
+    *,
+    confirm: Callable[[str, str], bool | Awaitable[bool]] | None = None,
+    manager: FingerprintManager | None = None,
+) -> str:
+    """:func:`verify_peer_trust` 的异步版：``confirm`` 可返回 awaitable。
+
+    阶段 9 批 4 新增——主控端 UI 的指纹确认框是协程（非模态 + asyncio.Future，
+    D26），同步 confirm 无法 await 用户点击。判定语义与安全边界与同步版逐条
+    一致（无证书拒、已信任过、无回调拒、拒绝即抛），仅把用户确认一步改为
+    :func:`inspect.isawaitable` 感知的 await。
+
+    Raises:
+        TlsError: 同同步版。
+    """
+    fp_manager = manager or get_fingerprint_manager()
+    fingerprint = fingerprint_of_ssl_object(ssl_object)
+    if fingerprint is None:
+        raise TlsError("无法获取对端证书，拒绝连接")
+    if fp_manager.is_trusted(fingerprint, host):
+        _LOGGER.info("tls_fingerprint_trusted", host=host)
+        return fingerprint
+    if confirm is None:
+        raise TlsError(f"首次连接需确认证书指纹但未提供确认回调：{fingerprint} ({host})")
+    _LOGGER.info("tls_fingerprint_first_use", fingerprint=fingerprint, host=host)
+    verdict = confirm(fingerprint, host)
+    verdict = bool(await verdict) if inspect.isawaitable(verdict) else bool(verdict)
+    if verdict:
         fp_manager.trust(fingerprint, host)
         return fingerprint
     raise TlsError("用户拒绝证书指纹，连接中止")
