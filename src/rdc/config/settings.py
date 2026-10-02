@@ -73,6 +73,9 @@ class Settings(BaseModel):
     # --- 网络 ---
     port: int = 9999
     control_port: int = 9998
+    # 被控端监听地址（阶段 9）：默认全部网卡（远程桌面产品语义）；
+    # 收紧示例：127.0.0.1（本机调试）/ 指定内网地址。
+    bind_host: str = "0.0.0.0"
     max_connections: int = 10
     bandwidth_limit: int = 0  # KB/s，0=不限
     enable_compression: bool = True
@@ -102,6 +105,9 @@ class Settings(BaseModel):
     auth_timeout: int = 10
     max_auth_attempts: int = 3
     auth_ban_duration: int = 300
+    # 服务端口令 bcrypt 哈希（阶段 9 决策 A 加回：v4 同构持久化，
+    # set-password CLI/UI 写入；空串 = 未设密码，任意口令通过——v4 语义保留）。
+    password_hash: str = ""  # nosec B105 -- 字段默认值，非凭据
     # --- TLS ---
     tls_cert_generated: int = 0
     # 用户证书（阶段 9.3）：两者均非空且校验通过 → 服务端用用户证书替代自签名；

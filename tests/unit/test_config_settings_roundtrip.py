@@ -103,7 +103,9 @@ class TestLoadSave:
         assert st.port == 8888
         assert st.jpeg_quality == 72
         assert st.recent_hosts == ["10.0.0.1"]
-        assert "password_hash" not in st.model_dump()
+        # v6 清空旧哈希；阶段 9 方案 A 把 password_hash 加回 Settings（默认空串），
+        # "旧密码不迁移"的语义 = 迁移后值为空，而非字段缺席。
+        assert st.password_hash == ""
         assert not hasattr(st, "saved_password")
 
     def test_save_atomic_leaves_no_temp_files(self, tmp_app_dir: Path, config_file: Path) -> None:

@@ -20,6 +20,7 @@ v5 仍然走完整握手：令牌照常签发、nonce 照常交换、HMAC 照常
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -37,6 +38,18 @@ _LOG = get_logger("transport.server")
 #: 会话建立回调：``async fn(session) -> None``；``session.next_message()`` 收到
 #: ``None``（对端关闭）时应尽快返回，:meth:`TransportServer.stop` 会兜底取消。
 SessionHook = Callable[[StreamChannel], "Awaitable[None]"]
+
+#: 连接准入回调（阶段 9 批 3 最小扩展）：``fn(client_ip) -> bool``。
+#: TLS 建立后、握手帧读取**前**调用；返回 ``False`` 立即关流拒绝
+#: （封禁/黑白名单/限流判定归 server 层，传输层不引入策略依赖）。
+ClientCheck = Callable[[str], bool]
+
+#: 认证失败回调（阶段 9 批 3 最小扩展）：``fn(client_ip, channel) -> None``。
+#: 控制通道口令校验失败/握手协议非法、画面通道令牌无效（``AuthError``）时
+#: 调用；``channel`` ∈ ``{"control", "screen"}``。**不**调用的失败：
+#: TLS/网络类（连接未进入认证阶段）、握手**超时**（对端未发出任何口令尝试，
+#: 计入会污染爆破防护窗口语义）。
+AuthFailedHook = Callable[[str, str], None]
 
 
 class ControlSession(StreamChannel):
@@ -68,6 +81,10 @@ class TransportServer:
         tokens: 会话令牌存储（画面通道一次性消费）。
         max_connections: 并发会话上限（信号量，v4 语义）。
         on_control_session / on_screen_session: 会话建立后的业务回调。
+        check_client: TLS 后、握手前的连接准入判定（阶段 9 批 3 扩展，
+            返回 ``False`` 关流拒绝；缺省全通过）。
+        on_auth_failed: 认证阶段失败通知（阶段 9 批 3 扩展，供封禁计数；
+            缺省不上报）。
     """
 
     def __init__(
@@ -83,6 +100,8 @@ class TransportServer:
         max_connections: int = 100,
         on_control_session: SessionHook | None = None,
         on_screen_session: SessionHook | None = None,
+        check_client: ClientCheck | None = None,
+        on_auth_failed: AuthFailedHook | None = None,
     ) -> None:
         self._host = host
         self._control_port = control_port
@@ -93,6 +112,8 @@ class TransportServer:
         self._sem = asyncio.Semaphore(max_connections)
         self._on_control = on_control_session
         self._on_screen = on_screen_session
+        self._check_client = check_client
+        self._on_auth_failed = on_auth_failed
         self._servers: list[asyncio.Server] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._sessions: set[StreamChannel] = set()
@@ -170,9 +191,12 @@ class TransportServer:
         return client_connected
 
     async def _handle_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """控制端口：TLS 已由 asyncio 完成 → 认证握手 → 会话交付。"""
+        """控制端口：TLS 已由 asyncio 完成 → 准入 → 认证握手 → 会话交付。"""
         peer = writer.get_extra_info("peername")
         client_ip = str(peer[0]) if peer else "?"
+        if not self._admit(client_ip):
+            writer.close()
+            return
         if self._sem.locked():  # 已达并发上限：立即拒绝（v4 acquire(blocking=False) 语义）
             self._log.warning("connection_refused_limit", client=client_ip)
             writer.close()
@@ -189,7 +213,13 @@ class TransportServer:
                     ),
                     timeout=HANDSHAKE_TIMEOUT,
                 )
-            except (TimeoutError, AuthError, TlsError, OSError) as exc:
+            except AuthError as exc:
+                self._log.warning("control_handshake_rejected", client=client_ip, error=str(exc))
+                self._notify_auth_failed(client_ip, "control")
+                stream.close()
+                await stream.wait_closed()
+                return
+            except (TimeoutError, TlsError, OSError) as exc:
                 self._log.warning("control_handshake_rejected", client=client_ip, error=str(exc))
                 stream.close()
                 await stream.wait_closed()
@@ -204,9 +234,12 @@ class TransportServer:
                 await session.close()
 
     async def _handle_screen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """画面端口：TLS → ``ScreenJoin`` 令牌消费 → 会话交付（broadcaster 注册点）。"""
+        """画面端口：TLS → 准入 → ``ScreenJoin`` 令牌消费 → 会话交付（broadcaster 注册点）。"""
         peer = writer.get_extra_info("peername")
         client_ip = str(peer[0]) if peer else "?"
+        if not self._admit(client_ip):
+            writer.close()
+            return
         if self._sem.locked():
             self._log.warning("connection_refused_limit", client=client_ip)
             writer.close()
@@ -222,7 +255,13 @@ class TransportServer:
                     ),
                     timeout=HANDSHAKE_TIMEOUT,
                 )
-            except (TimeoutError, AuthError, TlsError, OSError) as exc:
+            except AuthError as exc:
+                self._log.warning("screen_join_rejected", client=client_ip, error=str(exc))
+                self._notify_auth_failed(client_ip, "screen")
+                stream.close()
+                await stream.wait_closed()
+                return
+            except (TimeoutError, TlsError, OSError) as exc:
                 self._log.warning("screen_join_rejected", client=client_ip, error=str(exc))
                 stream.close()
                 await stream.wait_closed()
@@ -235,6 +274,36 @@ class TransportServer:
             finally:
                 self._sessions.discard(session)
                 await session.close()
+
+    # -- 阶段 9 批 3 最小扩展：准入 / 认证失败上报 ----------------------------
+
+    def _admit(self, client_ip: str) -> bool:
+        """TLS 后、握手前的准入判定（无回调=全通过）。"""
+        if self._check_client is None:
+            return True
+        try:
+            verdict = self._check_client(client_ip)
+        except Exception as exc:  # 准入判定异常视为拒绝（fail-closed，S1-S4 口径）
+            self._log.error("client_check_failed_fail_closed", client=client_ip, error=repr(exc))
+            return False
+        if inspect.isawaitable(verdict):
+            # 异步回调误接线（契约 ClientCheck 为同步）：拒绝并销毁协程——
+            # bool(协程) 恒真是静默放行漏洞，绝不允许。
+            self._log.error("client_check_returned_awaitable_fail_closed", client=client_ip)
+            close = getattr(verdict, "close", None)
+            if callable(close):
+                close()
+            return False
+        return bool(verdict)
+
+    def _notify_auth_failed(self, client_ip: str, channel: str) -> None:
+        """认证失败上报（无回调=no-op；回调异常隔离，不破坏拒绝路径）。"""
+        if self._on_auth_failed is None:
+            return
+        try:
+            self._on_auth_failed(client_ip, channel)
+        except Exception as exc:  # 记账失败不得掩盖原始拒绝（记录，约束 6）
+            self._log.error("auth_failed_hook_error", client=client_ip, error=repr(exc))
 
     async def _run_hook(
         self,

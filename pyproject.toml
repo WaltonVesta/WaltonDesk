@@ -176,7 +176,7 @@ ignore = [
 "src/rdc/config/_v4_config.py" = ["N801"]   # DATA_BLOB (DPAPI 结构体)
 "src/rdc/input/dpi.py" = ["N806"]            # DCX_WINDOW 等 Win32 常量
 "src/rdc/server/pid_manager.py" = ["N806"]   # PROCESS_QUERY_LIMITED_INFORMATION
-"src/rdc/server/service.py" = ["N806"]       # MAX_BAN_RECORDS
+# ✅(phase-9): 原 rdc/server/service.py（v4 线程模型）已随批 3 拆除删除，本豁免移除
 # N812：协议层 `constants as C` / `messages as M` 单字母别名是 wire 代码惯例，
 # 缩短逐包构造/解析路径中高频字段前缀，提升往返代码可读性。
 "src/rdc/protocol/**" = ["N812"]
@@ -301,8 +301,9 @@ module = [
     # ✅(phase-4): 移除 rdc.transport.{control_channel,screen_channel,heartbeat,reconnect}
     #   （asyncio 重写完成，全部走全局 strict；新 transport 模块一律不加入本清单）
     # server（阶段 3-9 拆分为 auth/broadcaster/banlist）
-    "rdc.server.service",
-    "rdc.server.pid_manager",
+    # ✅(phase-9): 原 rdc.server.service（v4 线程模型）已删除，豁免同步移除
+    # ✅(phase-9): 移除 rdc.server.pid_manager（批 3 接入：路径收敛 paths +
+    #   补类型注解后全局 strict 实测 0 error，兑现 TODO(phase-3/4)）
     # ✅(phase-5): 移除 rdc.capture.{diff,mss_source}、rdc.encoding.jpeg
     # ✅(phase-6): 移除 rdc.capture.framerate（v5 重写补全注解）
     # client（阶段 1 补注解后移除）

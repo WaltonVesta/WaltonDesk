@@ -1,1213 +1,590 @@
-"""
-被控端后台服务 - 主动推送模式
+"""被控端服务（阶段 9 批 3 重写，D14）：asyncio 装配与生命周期编排。
+
+v4 ``RemoteService``（1,213 行线程模型，原 ``server/service.py``，批 3 已拆除删除、
+git 历史可恢复）→ v5 ``HostService`` 按"瘦身为生命周期编排"的原计划拆分落地：
+
+::
+
+    HostService（本文件）
+      ├─ TransportServer        (transport/server.py)  TLS 双端口监听/握手
+      │    ├─ check_client      → server/auth.HostAuth.check_client   ┐ 批3
+      │    └─ on_auth_failed    → HostAuth.on_auth_failure            ┘ 扩展回调
+      ├─ HostAuth               (server/auth.py)  准入/封禁/限流/审计接线
+      ├─ SubscriptionRegistry   (server/broadcaster.py) 画面订阅/回收/关键帧
+      │    └─ ScreenBroadcaster (transport/broadcaster.py, B3 修复件)
+      ├─ ScreenPipeline         (server/pipeline.py) 采集→差分→编码→publish
+      ├─ InputBackend           (input/base.default_backend) 输入注入执行
+      └─ AuditLogger / Banlist  (server/audit.py / server/banlist.py)
+
+与 v4 的行为差异（均记录于 STAGE9_REPORT）：
+- accept 线程 + ThreadPoolExecutor + 每客户端线程 → 单事件循环协程；
+- 裸 4B 握手 / JSON 载荷 → 15B 分帧 + Protobuf + HMAC（阶段 3/4 栈）；
+- ``welcome`` 帧不再发送（``AuthResponse`` 即欢迎，批 4 主控端按 v5 协议实现）；
+- 剪贴板 ``tk.Tk()`` 工作线程（B2）→ ``pyperclip`` + ``asyncio.to_thread``（零 Qt）；
+- Semaphore 计数对象从"客户端"变为"会话"（控制+画面各 1）：``max_connections=10``
+  ≈ 5 个客户端（个人自用可接受）；
+- 口令/开关热更新需 :meth:`restart`（v4 同样经重启路径；transport 握手读
+  构造期哈希）。
+
+线程红线（阶段 6 固化）：``broadcaster.publish`` 与输入注入调用固定事件循环
+线程；采集/差分/编码在 pipeline 自有单 worker executor。UI 触达一律经信号，
+本模块零 Qt 导入（被控端核心可无 GUI 运行，CLI ``rdc serve``）。
 """
 
-import json
-import socket
-import ssl
-import struct
-import threading
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import datetime
 import time
-import uuid
-from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
 
-from rdc.capture.diff import ScreenDiffer
 from rdc.capture.framerate import FramerateController
-from rdc.capture.mss_source import ScreenCapturer
-from rdc.client.ratelimit import RateLimiter
-from rdc.config._v4_config import CONFIG_DIR, Config
-from rdc.constants import (
-    CONNECTION_RATE_LIMIT,
-    DEFAULT_PORT,
-    MAX_CONNECTIONS,
-    PKT_TYPE_CLIPBOARD,
-    PKT_TYPE_CONTROL,
-    PKT_TYPE_HEARTBEAT,
-    PKT_TYPE_SCREEN,
-    PKT_TYPE_STREAM_CONTROL,
+from rdc.capture.mss_source import MssScreenSource
+from rdc.capture.source import ScreenSource
+from rdc.config.paths import cert_dir, ensure_dirs
+from rdc.config.settings import Settings, current_settings
+from rdc.encoding.raters import AdaptiveRater, RaterSignals
+from rdc.exceptions import TlsError
+from rdc.input.base import InputBackend, default_backend
+from rdc.input.base import MouseButton as InputMouseButton
+from rdc.logging import get_logger
+from rdc.protocol.messages import (
+    ClipboardEvent,
+    Heartbeat,
+    HeartbeatKind,
+    KeyAction,
+    KeyEvent,
+    Message,
+    ModifierKey,
+    MouseAction,
+    MouseButton,
+    MouseEvent,
+    StreamCmd,
+    StreamControl,
 )
-from rdc.encoding.jpeg import BandwidthProbe, JPEGEncoder
-from rdc.logger import get_logger
-from rdc.protocol.framing import Packet, PacketBuffer
+from rdc.security.audit_events import EVENTS
+from rdc.security.certs import ExpiryStatus, UserCertBundle, check_expiry, load_user_cert_bundle
+from rdc.server.audit import AuditLogger
+from rdc.server.auth import REASON_BAD_PASSWORD, HostAuth
+from rdc.server.broadcaster import SubscriptionRegistry
+from rdc.server.pid_manager import PIDManager
+from rdc.server.pipeline import ScreenPipeline
+from rdc.server.stats import HostSnapshot
+from rdc.transport.base import StreamChannel
+from rdc.transport.server import ControlSession, ScreenSession, TransportServer
+from rdc.transport.session_token import SessionTokenStore
+from rdc.transport.tls import ensure_server_cert
 
-from .pid_manager import PIDManager
+__all__ = ["HostService"]
 
-# TODO(phase-6): v4 托盘基于 Tkinter + pystray，gui/ 已随原件移入 legacy_v4/，
-# 故此导入在 v5 树中不存在，运行时走 except 分支 → HAS_TRAY=False（无托盘降级）。
-# 阶段 6 将用 QSystemTrayIcon 重写为 rdc.ui.tray，届时替换本段并移除此 ignore。
-# 用带错误码的 ignore（非裸 ignore），符合 pyproject 的 ignore-without-code 约束。
-try:
-    from gui.tray import SystemTray  # type: ignore[import-not-found]
-    HAS_TRAY = True
-except ImportError:
-    # SystemTray 显式置 None，确保无论导入成败该名字都有定义（优于 v4 原样）。
-    SystemTray = None
-    HAS_TRAY = False
+_LOG = get_logger("server.service")
+
+#: 协议鼠标键枚举 → input 层枚举。
+_PROTO_BUTTON_TO_INPUT: dict[MouseButton, InputMouseButton] = {
+    MouseButton.LEFT: InputMouseButton.LEFT,
+    MouseButton.RIGHT: InputMouseButton.RIGHT,
+    MouseButton.MIDDLE: InputMouseButton.MIDDLE,
+}
+
+#: 协议修饰键枚举 → input 规范键名（阶段 7 D31 值域）。
+_MODIFIER_NAMES: dict[ModifierKey, str] = {
+    ModifierKey.CTRL: "ctrl",
+    ModifierKey.SHIFT: "shift",
+    ModifierKey.ALT: "alt",
+    ModifierKey.WIN: "win",
+    ModifierKey.ALTGR: "altgr",
+}
+
+#: 到期封禁批清理周期（秒）。
+BAN_CLEANUP_INTERVAL_S = 60.0
+
+_SERVER_NAME = "RemoteControlService"
 
 
-class RemoteService:
-    """远程控制服务 - 主动推送画面"""
+class HostService:
+    """被控端服务：TLS 双端口 + 画面推流 + 输入执行 + 安全接线。
 
-    def __init__(self, show_tray: bool = True):
-        self.config = Config()
-        self.logger = get_logger()
-        self.pid_manager = PIDManager("RemoteControlService")
+    Args:
+        settings: 运行时配置（``None`` 取 :func:`current_settings` 单例）。
+        source: 采集源注入（测试注入 ``ArrayScreenSource``；``None`` 生产用
+            :class:`MssScreenSource`，构造延后到 :meth:`start`——避免
+            import/实例化期触屏）。
+        input_backend: 输入后端注入（测试注入替身；``None`` 首次需要时经
+            :func:`default_backend` 平台工厂构造——Windows=SendInput，
+            macOS/Linux 空实现按阶段 7 范围回退）。
+        auth: 认证准入门注入（测试替身；``None`` 用 settings 构造 :class:`HostAuth`）。
+        audit: 审计发射器注入（缺省新建；与 ``auth`` 共享同一实例时
+            控制操作聚合可经服务节拍统一 flush）。
+        show_tray: 是否由装配层启用托盘（本核心类不含 GUI：``True`` 仅记录
+            意图，托盘接线归 ``rdc.ui`` 的 serve 装配入口，批 4）。
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        source: ScreenSource | None = None,
+        input_backend: InputBackend | None = None,
+        auth: HostAuth | None = None,
+        audit: AuditLogger | None = None,
+        show_tray: bool = True,
+    ) -> None:
+        self._settings = settings if settings is not None else current_settings()
+        self._source = source
+        self._input_backend = input_backend
+        self._audit = audit if audit is not None else AuditLogger()
+        self._auth = auth if auth is not None else HostAuth(self._settings, audit=self._audit)
         self.show_tray = show_tray
 
-        # 屏幕组件
-        self.capturer = ScreenCapturer()
-        self.encoder = JPEGEncoder()
-        self.differ = ScreenDiffer()
-        self.framerate = FramerateController(
-            min_fps=self.config.get('min_fps', 5),
-            max_fps=self.config.get('max_fps', 30)
+        self.pid_manager = PIDManager(_SERVER_NAME)
+        self._server: TransportServer | None = None
+        self._tokens = SessionTokenStore()
+        self._registry = SubscriptionRegistry(
+            on_new_subscriber=self._on_new_subscriber,
+            on_removed=self._on_subscriber_removed,
         )
+        self._pipeline: ScreenPipeline | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._pipeline_task: asyncio.Task[None] | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._control_sessions: set[ControlSession] = set()
+        self._paused = False
+        self._should_exit = False
+        self._start_time = 0.0
+        self._cert_bundle: UserCertBundle | None = None
 
-        # 网络
-        self._server_socket: socket.socket | None = None
-        self._control_socket: socket.socket | None = None
-        self._clients: set[socket.socket] = set()
-        self._client_lock = threading.Lock()
-        self._client_threads: dict[socket.socket, threading.Thread] = {}
-        self._running = False          # 服务运行状态
-        self._paused = False           # 是否暂停（服务停止但进程保持）
-        self._should_exit = False      # 进程退出标志
-        
-        # 画面推送控制
-        self._screen_streaming: dict[socket.socket, bool] = {}
-        self._streaming_lock = threading.Lock()
-        
-        # 连接限流
-        max_connections = self.config.get('max_connections', MAX_CONNECTIONS)
-        self._connection_semaphore = threading.Semaphore(max_connections)
-        self._rate_limiter = RateLimiter(
-            max_connections_per_second=CONNECTION_RATE_LIMIT
-        )
-        
-        # 线程池
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=max_connections * 2,
-            thread_name_prefix="RemoteService"
-        )
-        
-        # 统计信息
-        # start_time 存储 time.time()（float），故整体标注为 float 值字典。
-        self._stats: dict[str, float] = {
-            'total_connections': 0,
-            'active_connections': 0,
-            'start_time': 0.0,
-            'bytes_sent': 0,
-            'bytes_recv': 0,
-        }
+    # ================================================================== 生命周期
 
-        # ===== v4.0.0：ScreenBroadcaster 单例 =====
-        # v4.0.1：注入 BandwidthProbe 实现动态码率调整
-        self.bandwidth_probe = BandwidthProbe()
-        self._broadcaster = self._ScreenBroadcaster(self, self.bandwidth_probe)
+    async def start(self) -> bool:
+        """启动服务（幂等；paused 态调用等同 :meth:`resume`）。
 
-        # ===== v4.0.0：认证封禁持久化 =====
-        self._banlist_path = CONFIG_DIR / "banlist.json"
-        self._ban_timestamps: dict[str, float] = {}
-        self._auth_failure_counts: dict[str, int] = {}
-        self._load_banlist()
-
-        # ===== v4.0.1：会话令牌（画面通道认证，60秒有效，单次使用） =====
-        self._session_tokens: dict[str, float] = {}
-        self._SESSION_TOKEN_TTL = 60.0
-
-        # ===== v4.0.0：TLS =====
-        self._ssl_context: ssl.SSLContext | None = None
-
-        # 托盘
-        self._tray: SystemTray | None = None
-        self._tray_thread: threading.Thread | None = None
-
-    def start(self) -> bool:
-        """启动服务（如果已暂停则恢复）"""
+        Returns:
+            ``True`` 监听成功；``False`` 端口占用等启动失败（可观测，已回滚）。
+        """
         if self._should_exit:
-            self.logger.warning("进程即将退出，无法启动服务")
+            _LOG.warning("host_service_exit_requested_skip_start")
             return False
-
-        if self._running:
-            self.logger.info("服务已在运行")
+        if self._server is not None and self._server.listening:
+            _LOG.info("host_service_already_running")
             return True
 
-        self.logger.info("正在启动服务...")
         self.pid_manager.cleanup_stale()
-        self._running = True
-        self._paused = False
-        self._stats['start_time'] = time.time()
-        self.pid_manager.write()
-
-        port = self.config.get('port', DEFAULT_PORT)
-        control_port = self.config.get('control_port', DEFAULT_PORT - 1)
-
-        # ===== v4.0.0：强制 TLS，自动生成自签名证书 =====
-        self._ensure_tls_cert()
-        self._create_ssl_context()
-
-        if not self._start_server(port, control_port):
-            self._running = False
+        s = self._settings
+        try:
+            cert_path, key_path = self._prepare_certificates()
+            self._server = TransportServer(
+                host=s.bind_host,
+                control_port=s.control_port,
+                screen_port=s.port,
+                cert_path=cert_path,
+                key_path=key_path,
+                password_hash=self._auth.password_hash,
+                tokens=self._tokens,
+                max_connections=s.max_connections,
+                on_control_session=self._serve_control,
+                on_screen_session=self._serve_screen,
+                check_client=self._auth.check_client,
+                on_auth_failed=self._on_auth_failed_hook,
+            )
+            await self._server.start()
+        except (OSError, TlsError) as exc:
+            # TlsError：用户证书加载失败（S1 口径不回落自签名）→ 启动失败可观测
+            _LOG.error("host_service_start_failed", error=str(exc))
+            self._server = None
             return False
 
-        if self.show_tray and HAS_TRAY and self._tray is None:
-            self._start_tray()
-
-        self.logger.info(f"✅ 服务已启动，主端口: {port}，控制端口: {control_port}")
-        self.logger.info(f"📡 画面主动推送模式，目标帧率: {self.config.get('max_fps', 30)} FPS")
+        self._paused = False
+        self._start_time = time.time()
+        self.pid_manager.write()
+        self._ensure_screen_source()
+        self._ensure_pipeline()
+        self._stop_event = asyncio.Event()
+        assert self._pipeline is not None and self._stop_event is not None
+        loop = asyncio.get_running_loop()
+        self._pipeline_task = loop.create_task(self._pipeline.run(stop=self._stop_event), name="pipeline")
+        self._cleanup_task = loop.create_task(self._ban_cleanup_loop(), name="ban-cleanup")
+        _LOG.info(
+            "host_service_started",
+            bind_host=s.bind_host,
+            control_port=s.control_port,
+            screen_port=s.port,
+            auth=s.enable_auth and bool(s.password_hash),
+            user_cert=self._cert_bundle is not None,
+        )
         return True
 
-    def _start_tray(self) -> None:
-        """启动系统托盘"""
-        def tray_loop():
-            self._tray = SystemTray(
-                on_toggle_pause=self._toggle_pause,
-                on_restart=self._restart,
-                on_exit=self.shutdown,
-                is_paused_callback=self.is_paused
-            )
-            self._tray.set_client_count_callback(self.get_client_count)
-            self._tray.run()
-
-        self._tray_thread = threading.Thread(target=tray_loop, daemon=True)
-        self._tray_thread.start()
-        self.logger.info("系统托盘已启动")
-
-    def _toggle_pause(self) -> None:
-        """切换暂停/继续状态"""
-        if self._paused:
-            self.resume()
-        else:
-            self.pause()
-
-    def pause(self) -> None:
-        """暂停服务（进程保持，托盘保留）"""
-        if not self._running or self._paused:
+    async def pause(self) -> None:
+        """暂停：停止监听与推流，进程保留（v4 pause 语义，托盘菜单用）。"""
+        if self._paused or self._server is None:
             return
-        self.logger.info("正在暂停服务...")
+        await self._teardown_runtime()
         self._paused = True
-        self._running = False   # 停止接受新连接和推送
+        _LOG.info("host_service_paused")
 
-        # 停止画面推送
-        with self._streaming_lock:
-            for conn in list(self._screen_streaming.keys()):
-                self._screen_streaming[conn] = False
-            self._screen_streaming.clear()
-
-        # 关闭客户端（v4.0.0：强制shutdown中断阻塞recv）
-        with self._client_lock:
-            for conn in list(self._clients):
-                self._shutdown_and_close(conn, "暂停服务")
-            self._clients.clear()
-            self._client_threads.clear()
-
-        # 停止广播器
-        self._broadcaster.stop()
-
-        # 关闭服务器 socket
-        self._close_quietly(self._server_socket, "暂停服务(主端口)")
-        self._server_socket = None
-        self._close_quietly(self._control_socket, "暂停服务(控制端口)")
-        self._control_socket = None
-
-        # 关闭线程池（不等待，因为可能还有任务）
-        try:
-            self._thread_pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            # 线程池异常面不确定（可能已被前次 pause/resume 关闭）。
-            # 保持宽捕获以免异常逸出中断暂停流程，但记录而非静默（约束 6）。
-            self.logger.debug("暂停服务: 关闭线程池异常", exc_info=True)
-
-        # PID文件保留，表示进程还在
-        self.logger.info("✅ 服务已暂停（进程保持运行，托盘保留）")
-        # 通知托盘更新菜单
-        if self._tray:
-            self._tray.update_menu()
-
-    def resume(self) -> None:
-        """恢复服务（从暂停状态）"""
+    async def resume(self) -> None:
+        """恢复监听与推流（pause 的逆操作）。"""
         if not self._paused:
             return
-        self.logger.info("正在恢复服务...")
-        # 重新初始化网络组件
-        self._running = True
         self._paused = False
-        # 重新创建线程池
-        max_connections = self.config.get('max_connections', MAX_CONNECTIONS)
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=max_connections * 2,
-            thread_name_prefix="RemoteService"
-        )
-        port = self.config.get('port', DEFAULT_PORT)
-        control_port = self.config.get('control_port', DEFAULT_PORT - 1)
-        if self._start_server(port, control_port):
-            self.logger.info("✅ 服务已恢复")
-        else:
-            self._running = False
-            self._paused = True
-            self.logger.error("❌ 服务恢复失败")
-        # 通知托盘更新菜单
-        if self._tray:
-            self._tray.update_menu()
-
-    def _restart(self) -> None:
-        """重启服务（先完全停止再启动）"""
-        self.logger.info("正在重启服务...")
-        # 先暂停
-        if not self._paused:
-            self.pause()
-        # 确保完全停止
-        time.sleep(0.5)
-        # 重新启动
-        self._paused = False
-        self.start()
-
-    # ========== v4.0.0：TLS 证书管理 ==========
-
-    def _ensure_tls_cert(self) -> None:
-        """确保自签名TLS证书存在，不存在或过期则自动生成"""
-        cert_path = CONFIG_DIR / "cert.pem"
-        key_path = CONFIG_DIR / "key.pem"
-        if cert_path.exists() and key_path.exists():
-            try:
-                import datetime
-
-                from cryptography import x509
-                cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-                # 检查是否过期（剩余有效期不足7天则重新生成）
-                try:
-                    not_valid_after = cert.not_valid_after_utc
-                except AttributeError:
-                    not_valid_after = cert.not_valid_after.replace(tzinfo=datetime.UTC)
-                if (not_valid_after - datetime.datetime.now(datetime.UTC)).days > 7:
-                    return
-            except Exception as e:
-                self.logger.warning(f"证书检查失败，将重新生成: {e}")
-        self._generate_self_signed_cert(cert_path, key_path)
-
-    def _generate_self_signed_cert(self, cert_path, key_path) -> None:
-        """使用cryptography库生成2048位RSA自签名证书"""
-        import datetime
-
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.x509.oid import NameOID
-
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, "RemoteDesktop"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "RemoteDesktop Control"),
-        ])
-        now = datetime.datetime.now(datetime.UTC)
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + datetime.timedelta(days=365))
-            .sign(key, hashes.SHA256())
-        )
-        key_path.write_bytes(key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption()
-        ))
-        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-        self.config.set('tls_cert_generated', int(time.time()))
-        self.logger.info("🔐 已自动生成2048位RSA自签名TLS证书")
-
-    def _create_ssl_context(self) -> None:
-        """创建服务端SSL上下文（强制TLS 1.2+）"""
-        cert_path = CONFIG_DIR / "cert.pem"
-        key_path = CONFIG_DIR / "key.pem"
-        self._ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        self._ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-        self._ssl_context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
-        self.logger.info("🔐 TLS上下文已创建（强制TLS 1.2+）")
-
-    def _start_server(self, port: int, control_port: int) -> bool:
-        try:
-            self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-            self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-            self._server_socket.bind(('0.0.0.0', port))
-            self._server_socket.listen(MAX_CONNECTIONS * 2)
-            self._server_socket.settimeout(1.0)
-            self.logger.info(f"📡 主端口监听: {port} (画面传输)")
-
-            self._control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._control_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self._control_socket.bind(('0.0.0.0', control_port))
-            self._control_socket.listen(MAX_CONNECTIONS * 2)
-            self._control_socket.settimeout(1.0)
-            self.logger.info(f"📡 控制端口监听: {control_port} (控制指令)")
-
-            threading.Thread(target=self._accept_loop, 
-                           args=(self._server_socket, "主端口"), 
-                           daemon=True).start()
-            threading.Thread(target=self._accept_loop, 
-                           args=(self._control_socket, "控制端口"), 
-                           daemon=True).start()
-            return True
-            
-        except OSError as e:
-            self.logger.error(f"端口绑定失败: {e}")
-            self._close_quietly(self._server_socket, "端口绑定失败(主端口)")
-            self._server_socket = None
-            self._close_quietly(self._control_socket, "端口绑定失败(控制端口)")
-            self._control_socket = None
-            return False
-        except Exception as e:
-            self.logger.error(f"启动服务器失败: {e}")
-            return False
-
-    def _accept_loop(self, server_socket: socket.socket, socket_name: str = "主端口") -> None:
-        # _accept_loop 由 _start_server 在 _create_ssl_context() 之后启动，
-        # 运行时 self._ssl_context 必非 None；取局部引用收窄类型并做防御性判空。
-        ssl_context = self._ssl_context
-        if ssl_context is None:
-            self.logger.error("TLS 上下文未初始化，无法接受连接")
-            return
-        while self._running:
-            try:
-                raw_conn, addr = server_socket.accept()
-
-                # ===== v4.0.0：强制 TLS 包装 =====
-                try:
-                    conn = ssl_context.wrap_socket(raw_conn, server_side=True)
-                except Exception as e:
-                    self.logger.warning(f"TLS握手失败 {addr}: {e}")
-                    try:
-                        raw_conn.close()
-                    except OSError:
-                        # 握手失败的连接可能已损坏，关闭异常不阻断；记录以便排查泄漏。
-                        self.logger.debug("TLS握手失败后关闭连接异常", exc_info=True)
-                    continue
-
-                if not self._rate_limiter.allow():
-                    conn.close()
-                    self.logger.warning(f"{socket_name} 连接频率过高，拒绝 {addr}")
-                    continue
-                
-                if not self._connection_semaphore.acquire(blocking=False):
-                    conn.close()
-                    self.logger.warning(f"{socket_name} 连接数过多，拒绝 {addr}")
-                    continue
-                
-                self._stats['total_connections'] += 1
-                self._stats['active_connections'] += 1
-                self.logger.info(f"📶 {socket_name} 客户端连接: {addr} (活跃: {self._stats['active_connections']})")
-                
-                with self._client_lock:
-                    self._clients.add(conn)
-                
-                self._thread_pool.submit(self._handle_client, conn, addr, socket_name)
-                
-            except TimeoutError:
-                continue
-            except Exception as e:
-                if self._running:
-                    self.logger.error(f"{socket_name} 接受连接错误: {e}")
-
-    def _handle_client(self, conn: socket.socket, addr: tuple[str, int], socket_name: str = "主端口") -> None:
-        buffer = PacketBuffer()
-        client_addr = f"{addr[0]}:{addr[1]}"
-        last_heartbeat = time.time()
-
-        # ===== 新增：IP黑白名单检查 =====
-        if not self._check_ip_whitelist(addr[0]):
-            self.logger.warning(f"IP不在白名单: {client_addr}")
-            conn.close()
-            self._connection_semaphore.release()
-            self._stats['active_connections'] -= 1
-            return
-        if self._is_ip_blacklisted(addr[0]):
-            self.logger.warning(f"IP在黑名单: {client_addr}")
-            conn.close()
-            self._connection_semaphore.release()
-            self._stats['active_connections'] -= 1
-            return
-
-        # ===== 认证流程（v4.0.1：控制端口密码认证+令牌，画面端口令牌认证） =====
-        # v4.0.3：握手交换统一由 enable_auth 门控，保证两端结构严格对称：
-        #   启用认证 → 控制端口必须交换认证消息并发放会话令牌，画面端口必须校验令牌；
-        #   关闭认证 → 两端均不做任何交换。
-        # 旧版服务端无条件发放令牌/无条件要求令牌，而客户端仅在配置了密码时才交换，
-        # 导致未设密码时客户端拿不到令牌，画面通道认证必然失败、连接被服务端关闭（无画面）。
-        is_control_port = (socket_name == "控制端口")
-        enable_auth = self.config.get('enable_auth', False)
-
-        if is_control_port:
-            # 控制端口：密码认证
-            if not self._authenticate_client(conn, addr):
-                self.logger.warning(f"控制端口认证失败: {client_addr}")
-                if enable_auth:
-                    self._send_auth_response(conn, "AUTH_FAILED")
-                conn.close()
-                self._connection_semaphore.release()
-                self._stats['active_connections'] -= 1
-                return
-
-            if enable_auth:
-                # 认证成功：生成会话令牌（60秒有效，单次使用）
-                token = str(uuid.uuid4())
-                self._session_tokens[token] = time.time() + self._SESSION_TOKEN_TTL
-                self._send_auth_response(conn, "AUTH_OK", token=token)
-                self.logger.info(f"控制端口认证成功，已发放会话令牌: {client_addr}")
-            else:
-                self.logger.info(f"控制端口连接放行（未启用认证）: {client_addr}")
-        else:
-            # 画面端口：令牌认证（仅在启用认证时校验）
-            if enable_auth:
-                if not self._authenticate_screen_token(conn):
-                    self.logger.warning(f"画面端口令牌认证失败: {client_addr}")
-                    self._send_auth_response(conn, "AUTH_FAILED")
-                    conn.close()
-                    self._connection_semaphore.release()
-                    self._stats['active_connections'] -= 1
-                    return
-                self._send_auth_response(conn, "AUTH_OK")
-                self.logger.info(f"画面端口令牌认证成功: {client_addr}")
-            else:
-                self.logger.info(f"画面端口连接放行（未启用认证）: {client_addr}")
-        # ===== 认证结束 =====
-
-        with self._streaming_lock:
-            self._screen_streaming[conn] = False
-
-        try:
-            conn.settimeout(10.0)
-            self._send_welcome(conn)
-
-            while self._running:
-                try:
-                    data = conn.recv(65536)
-                    if not data:
-                        self.logger.info(f"客户端断开: {client_addr}")
-                        break
-
-                    # v4.0.3 修复：旧版 last_heartbeat 仅在连接建立时赋值、从不更新，
-                    # 导致任何一次超过10秒的 recv 超时都会直接满足“>20秒”条件，
-                    # 控制通道被服务端立即断开（客户端表现为连接一段时间后卡死）。
-                    # 现改为收到任何客户端数据即视为活跃。
-                    last_heartbeat = time.time()
-
-                    self._stats['bytes_recv'] += len(data)
-                    buffer.append(data)
-                    self._process_packets(conn, buffer, client_addr)
-
-                except TimeoutError:
-                    # v4.0.3 修复：画面流是纯下行通道，客户端订阅后不再发送上行
-                    # 数据，旧版以 recv 超时判活会在20秒后必然误断画面通道，
-                    # 导致主控端连接一会儿就黑屏。只要该连接仍是活跃订阅者就
-                    # 视为存活；若连接真正死亡，广播器 sendall 失败时会移除订阅，
-                    # 随后此超时机制会在20秒后正常清理。
-                    if self._broadcaster.has_subscriber(conn):
-                        last_heartbeat = time.time()
-                        continue
-                    if time.time() - last_heartbeat > 20:
-                        self.logger.warning(f"客户端心跳超时: {client_addr}")
-                        break
-                    continue
-                except OSError as e:
-                    self.logger.error(f"Socket错误 {client_addr}: {e}")
-                    break
-
-        except Exception as e:
-            self.logger.error(f"处理客户端错误 {client_addr}: {e}")
-        finally:
-            # v4.0.0：从广播器注销订阅
-            self._broadcaster.remove_subscriber(conn)
-            with self._streaming_lock:
-                self._screen_streaming.pop(conn, None)
-            with self._client_lock:
-                self._clients.discard(conn)
-                self._client_threads.pop(conn, None)
-            self._connection_semaphore.release()
-            self._stats['active_connections'] -= 1
-            self._shutdown_and_close(conn, f"客户端清理({client_addr})")
-            self.logger.info(f"客户端已清理: {client_addr} (活跃: {self._stats['active_connections']})")
-            if self._tray:
-                self._tray.update_client_count(self.get_client_count())
-
-    def _send_welcome(self, conn: socket.socket) -> None:
-        try:
-            welcome = Packet.create_json(PKT_TYPE_CONTROL, {
-                'type': 'welcome',
-                'version': '4.0.0',
-                'timestamp': time.time()
-            })
-            conn.sendall(welcome.to_bytes())
-            self._stats['bytes_sent'] += len(welcome.to_bytes())
-        except Exception as e:
-            self.logger.error(f"发送欢迎信息失败: {e}")
-
-    def _process_packets(self, conn: socket.socket, buffer: PacketBuffer, client_addr: str) -> None:
-        while True:
-            packet = buffer.pop_packet()
-            if packet is None:
-                break
-            try:
-                if packet.type == PKT_TYPE_STREAM_CONTROL:
-                    self._handle_stream_control(conn, packet)
-                elif packet.type == PKT_TYPE_SCREEN:
-                    # 旧的请求模式（兼容）
-                    self._start_screen_streaming(conn)
-                elif packet.type == PKT_TYPE_CONTROL:
-                    self._handle_control(conn, packet)
-                elif packet.type == PKT_TYPE_HEARTBEAT:
-                    self._handle_heartbeat(conn, packet)
-                elif packet.type == PKT_TYPE_CLIPBOARD:
-                    self._handle_clipboard(packet)
-                else:
-                    self.logger.debug(f"未知包类型: {packet.type}")
-            except Exception as e:
-                self.logger.error(f"处理数据包错误: {e}")
-
-    def _start_screen_streaming(self, conn: socket.socket) -> None:
-        """启动画面推送（v4.0.0：注册到ScreenBroadcaster单例，Zero-Copy分发）"""
-        with self._streaming_lock:
-            if self._screen_streaming.get(conn, False):
-                return
-            self._screen_streaming[conn] = True
-
-        self.logger.info(f"📷 注册画面订阅者 (客户端: {conn.getpeername()})")
-        self._broadcaster.add_subscriber(conn)
-
-    def _stop_screen_streaming(self, conn: socket.socket) -> None:
-        """停止画面推送（v4.0.0：从ScreenBroadcaster注销）"""
-        with self._streaming_lock:
-            if conn in self._screen_streaming:
-                self._screen_streaming[conn] = False
-        self._broadcaster.remove_subscriber(conn)
-        self.logger.info(f"📷 注销画面订阅者 (客户端: {conn.getpeername()})")
-
-    def _handle_stream_control(self, conn: socket.socket, packet: Packet) -> None:
-        """处理流控制指令"""
-        import json
-        try:
-            data = json.loads(packet.payload.decode('utf-8'))
-            cmd = data.get('cmd', '')
-
-            if cmd == 'start':
-                # 更新配置
-                config = data.get('config', {})
-                if config:
-                    self._update_stream_config(config)
-                self._start_screen_streaming(conn)
-
-            elif cmd == 'stop':
-                self._stop_screen_streaming(conn)
-
-            elif cmd == 'config':
-                # 仅更新配置，不启停流
-                config = data.get('config', {})
-                if config:
-                    self._update_stream_config(config)
-
-        except Exception as e:
-            self.logger.error(f"处理流控制失败: {e}")
-
-    def _update_stream_config(self, config: dict) -> None:
-        """更新流配置"""
-        if 'quality' in config:
-            self.encoder.set_quality(config['quality'])
-        if 'max_fps' in config:
-            self.framerate.max_fps = config['max_fps']
-        if 'min_fps' in config:
-            self.framerate.min_fps = config['min_fps']
-        self.logger.debug(f"流配置已更新: {config}")
-
-    # ========== 认证与安全 ==========
-
-    def _check_ip_whitelist(self, ip: str) -> bool:
-        """检查IP是否在白名单"""
-        if not self.config.get('enable_whitelist', False):
-            return True
-        whitelist = self.config.get('whitelist_ips', [])
-        return ip in whitelist
-
-    def _is_ip_blacklisted(self, ip: str) -> bool:
-        """检查IP是否在黑名单"""
-        if not self.config.get('enable_blacklist', False):
-            return False
-        blacklist = self.config.get('blacklist_ips', [])
-        return ip in blacklist
-
-    def _authenticate_client(self, conn: socket.socket, addr: tuple[str, int]) -> bool:
-        """认证客户端（v4.0.0：Bcrypt验证 + 封禁持久化 + 自动解封）"""
-        import json
-        import struct
-
-        enable_auth = self.config.get('enable_auth', False)
-        if not enable_auth:
-            return True
-
-        # v4.0.3：启用认证时，即使未设置密码也必须读取客户端的认证消息
-        # （客户端此时会发送空密码消息），保持握手对称；未设密码时
-        # verify_password 内部会直接放行。旧版在此提前返回不读消息，
-        # 导致客户端发来的消息残留在流中。
-        # 注：v4 此处有 `password_hash = self.config.get(...)` 的死赋值，真实哈希
-        # 由 verify_password 内部读取，故删除；阶段 2 迁移到 SecretStore 后统一处理。
-
-        ip = addr[0]
-        ban_duration = self.config.get('auth_ban_duration', 300)
-
-        # 检查是否被封禁（持久化，服务重启不丢失）
-        self._cleanup_expired_bans()
-        if ip in self._ban_timestamps:
-            if time.time() - self._ban_timestamps[ip] < ban_duration:
-                self.logger.warning(f"IP {ip} 已被封禁，拒绝认证")
-                return False
-            else:
-                # 自动解封
-                del self._ban_timestamps[ip]
-                self._auth_failure_counts.pop(ip, None)
-                self._save_banlist()
-
-        try:
-            conn.settimeout(self.config.get('auth_timeout', 10))
-
-            # 批量读取：先读4字节长度前缀
-            length_data = conn.recv(4)
-            if len(length_data) < 4:
-                self._record_auth_failure(ip)
-                return False
-
-            length = struct.unpack('>I', length_data)[0]
-            if length > 4096:  # 防止攻击
-                self._record_auth_failure(ip)
-                return False
-
-            # 读取实际数据
-            data = b''
-            while len(data) < length:
-                chunk = conn.recv(min(4096, length - len(data)))
-                if not chunk:
-                    break
-                data += chunk
-
-            if len(data) < length:
-                self._record_auth_failure(ip)
-                return False
-
-            # 解析JSON
-            try:
-                auth_data = json.loads(data.decode('utf-8'))
-                password = auth_data.get('password', '')
-            except Exception:
-                self._record_auth_failure(ip)
-                return False
-
-            # v4.0.0：使用Bcrypt验证密码
-            if self.config.verify_password(password):
-                # 认证成功，清除失败计数
-                self._auth_failure_counts.pop(ip, None)
-                return True
-            else:
-                self._record_auth_failure(ip)
-                return False
-
-        except TimeoutError:
-            self._record_auth_failure(ip)
-            return False
-        except Exception as e:
-            self.logger.error(f"认证异常: {e}")
-            return False
-        finally:
-            conn.settimeout(None)
-
-    def _record_auth_failure(self, ip: str) -> None:
-        """记录认证失败（v4.0.0：持久化到banlist.json）"""
-        self._auth_failure_counts[ip] = self._auth_failure_counts.get(ip, 0) + 1
-        if self._auth_failure_counts[ip] >= self.config.get('max_auth_attempts', 3):
-            self._ban_timestamps[ip] = time.time()
-            self._save_banlist()
-            self.logger.warning(f"IP {ip} 已被封禁 {self.config.get('auth_ban_duration', 300)} 秒")
-
-    def _cleanup_expired_bans(self) -> None:
-        """清理过期的封禁记录（自动解封）"""
-        ban_duration = self.config.get('auth_ban_duration', 300)
-        now = time.time()
-        expired = [ip for ip, ts in self._ban_timestamps.items() if now - ts >= ban_duration]
-        for ip in expired:
-            del self._ban_timestamps[ip]
-            self._auth_failure_counts.pop(ip, None)
-        if expired:
-            self._save_banlist()
-            self.logger.info(f"自动解封 {len(expired)} 个IP")
-
-    def _load_banlist(self) -> None:
-        """从banlist.json加载封禁记录"""
-        try:
-            if self._banlist_path.exists():
-                with open(self._banlist_path, encoding='utf-8') as f:
-                    data = json.load(f)
-                self._ban_timestamps = data.get('ban_timestamps', {})
-                self._auth_failure_counts = data.get('failure_counts', {})
-        except Exception as e:
-            self.logger.warning(f"加载banlist失败: {e}")
-            self._ban_timestamps = {}
-            self._auth_failure_counts = {}
-
-    def _save_banlist(self) -> None:
-        """保存封禁记录到banlist.json（v4.0.1：最大1000条，超出裁剪最早记录）"""
-        try:
-            # v4.0.1：防止文件无限增长，最多保留1000条
-            MAX_BAN_RECORDS = 1000
-            if len(self._ban_timestamps) > MAX_BAN_RECORDS:
-                # 按时间戳排序，保留最新的1000条
-                sorted_bans = sorted(self._ban_timestamps.items(), key=lambda x: x[1], reverse=True)
-                keep_ips = {ip for ip, _ in sorted_bans[:MAX_BAN_RECORDS]}
-                self._ban_timestamps = {ip: ts for ip, ts in self._ban_timestamps.items() if ip in keep_ips}
-                self._auth_failure_counts = {ip: c for ip, c in self._auth_failure_counts.items() if ip in keep_ips}
-                self.logger.info(f"banlist已裁剪至{MAX_BAN_RECORDS}条")
-
-            self._banlist_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._banlist_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'ban_timestamps': self._ban_timestamps,
-                    'failure_counts': self._auth_failure_counts,
-                    'saved_at': time.time(),
-                }, f, indent=2)
-        except Exception as e:
-            self.logger.warning(f"保存banlist失败: {e}")
-
-    # ========== v4.0.1：会话令牌认证（画面通道） ==========
-
-    def _close_quietly(self, sock: socket.socket | None, context: str) -> None:
-        """尽力关闭监听 socket；失败仅记录，不中断清理流程。
-
-        Args:
-            sock: 待关闭的 socket；为 None 时直接返回。
-            context: 调用场景描述，用于日志定位（如 "暂停服务"）。
-        """
-        if sock is None:
-            return
-        try:
-            sock.close()
-        except OSError:
-            # 清理路径的关闭失败不阻断主流程；记录以便排查句柄泄漏。
-            self.logger.debug(f"{context}: 关闭监听 socket 异常", exc_info=True)
-
-    def _shutdown_and_close(self, conn: socket.socket, context: str) -> None:
-        """尽力断开并关闭客户端连接。
-
-        先 ``shutdown(SHUT_RDWR)`` 中断对端可能阻塞的 ``recv``，再 ``close``。
-        两步都可能失败（对端已断开、句柄已失效），失败仅记录不抛出，
-        确保清理流程完整执行——这是 v4 ``try/except: pass`` 的等价替换，
-        区别在于不再静默（约束 6）。
-
-        Args:
-            conn: 待关闭的客户端连接。
-            context: 调用场景描述，用于日志定位。
-        """
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            self.logger.debug(f"{context}: shutdown 异常（对端可能已断开）", exc_info=True)
-        try:
-            conn.close()
-        except OSError:
-            self.logger.debug(f"{context}: 关闭客户端连接异常", exc_info=True)
-
-    def _send_auth_response(self, conn: socket.socket, status: str, token: str | None = None) -> None:
-        """发送长度前缀的JSON认证响应（v4.0.1）"""
-        payload = {'status': status}
-        if token:
-            payload['token'] = token
-        data = json.dumps(payload).encode('utf-8')
-        try:
-            conn.sendall(struct.pack('>I', len(data)) + data)
-        except OSError:
-            # 认证响应发送失败通常是客户端已断开；记录但不抛出，
-            # 由调用方（_handle_client）按认证结果决定关闭连接。
-            self.logger.debug(f"发送认证响应失败(status={status})", exc_info=True)
-
-    def _cleanup_expired_tokens(self) -> None:
-        """清理过期的会话令牌"""
-        now = time.time()
-        expired = [t for t, exp in self._session_tokens.items() if now >= exp]
-        for t in expired:
-            del self._session_tokens[t]
-
-    def _authenticate_screen_token(self, conn: socket.socket) -> bool:
-        """画面通道令牌认证（v4.0.1）
-
-        读取4字节长度前缀 + JSON {"token": "..."}，
-        校验令牌存在、未过期、未被使用。使用后立即失效（防重放）。
-        """
-        try:
-            conn.settimeout(self.config.get('auth_timeout', 10))
-
-            # 读取4字节长度前缀
-            length_data = conn.recv(4)
-            if len(length_data) < 4:
-                return False
-            length = struct.unpack('>I', length_data)[0]
-            if length > 4096:
-                return False
-
-            # 读取JSON payload
-            data = b''
-            while len(data) < length:
-                chunk = conn.recv(min(4096, length - len(data)))
-                if not chunk:
-                    break
-                data += chunk
-            if len(data) < length:
-                return False
-
-            auth_data = json.loads(data.decode('utf-8'))
-            token = auth_data.get('token', '')
-
-            if not token:
-                return False
-
-            # 清理过期令牌后校验
-            self._cleanup_expired_tokens()
-            if token not in self._session_tokens:
-                self.logger.warning(f"画面通道令牌无效或已过期: {token[:8]}...")
-                return False
-
-            # 单次使用：验证后立即删除，防止重放
-            del self._session_tokens[token]
-            return True
-
-        except (TimeoutError, json.JSONDecodeError, struct.error) as e:
-            self.logger.warning(f"画面通道令牌认证异常: {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"画面通道令牌认证错误: {e}")
-            return False
-        finally:
-            conn.settimeout(None)
-
-    def _handle_control(self, conn: socket.socket, packet: Packet) -> None:
-        try:
-            data = packet.to_json()
-            cmd_type = data.get('type', '')
-            if cmd_type == 'mouse':
-                self._execute_mouse(data)
-            elif cmd_type == 'key':
-                self._execute_key(data)
-            elif cmd_type == 'ping':
-                pong = Packet.create_json(PKT_TYPE_HEARTBEAT, {
-                    'type': 'pong',
-                    'timestamp': time.time()
-                })
-                conn.sendall(pong.to_bytes())
-                self._stats['bytes_sent'] += len(pong.to_bytes())
-            else:
-                self.logger.debug(f"未知控制指令: {cmd_type}")
-        except Exception as e:
-            self.logger.error(f"处理控制指令失败: {e}")
-
-    def _execute_mouse(self, data: dict) -> None:
-        try:
-            import pyautogui
-            pyautogui.FAILSAFE = True
-            action = data.get('action', 'move')
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            button = data.get('button', 'left')
-            screen_w, screen_h = self.capturer.get_screen_size()
-            x = max(0, min(screen_w - 1, x))
-            y = max(0, min(screen_h - 1, y))
-            if action == 'move':
-                pyautogui.moveTo(x, y)
-            elif action == 'press':
-                pyautogui.mouseDown(x, y, button=button)
-            elif action == 'release':
-                pyautogui.mouseUp(button=button)
-            elif action == 'click':
-                pyautogui.click(x, y, button=button)
-            elif action == 'scroll':
-                delta = data.get('delta', 0)
-                if delta != 0:
-                    pyautogui.scroll(delta)
-        except Exception as e:
-            self.logger.error(f"执行鼠标命令失败: {e}")
-
-    def _execute_key(self, data: dict) -> None:
-        try:
-            import pyautogui
-            action = data.get('action', 'press')
-            key = data.get('key', '')
-            modifiers = data.get('modifiers', [])
-            if action == 'press':
-                for mod in modifiers:
-                    pyautogui.keyDown(mod)
-                pyautogui.keyDown(key)
-                for mod in reversed(modifiers):
-                    pyautogui.keyUp(mod)
-            elif action == 'release':
-                pyautogui.keyUp(key)
-            elif action == 'type':
-                text = data.get('text', '')
-                pyautogui.typewrite(text)
-        except Exception as e:
-            self.logger.error(f"执行键盘命令失败: {e}")
-
-    def _handle_heartbeat(self, conn: socket.socket, packet: Packet) -> None:
-        try:
-            data = packet.to_json()
-            if data.get('type') == 'ping':
-                pong = Packet.create_json(PKT_TYPE_HEARTBEAT, {
-                    'type': 'pong',
-                    'timestamp': time.time()
-                })
-                conn.sendall(pong.to_bytes())
-                self._stats['bytes_sent'] += len(pong.to_bytes())
-        except Exception as e:
-            self.logger.error(f"处理心跳失败: {e}")
-
-    def _handle_clipboard(self, packet: Packet) -> None:
-        try:
-            data = packet.to_json()
-            text = data.get('text', '')
-            if text:
-                import tkinter as tk
-                root = tk.Tk()
-                root.withdraw()
-                root.clipboard_clear()
-                root.clipboard_append(text)
-                root.update()
-                root.destroy()
-                self.logger.debug(f"剪贴板已更新: {text[:50]}...")
-        except Exception as e:
-            self.logger.error(f"处理剪贴板失败: {e}")
-
-    # ========== 外部控制接口 ==========
+        await self.start()
+
+    async def shutdown(self) -> None:
+        """关停全部资源并请求进程退出（幂等）。"""
+        self._should_exit = True
+        await self._teardown_runtime()
+        self.pid_manager.remove()
+        _LOG.info("host_service_shutdown")
+
+    @property
     def is_running(self) -> bool:
-        return self._running
+        """服务处于监听状态。"""
+        return self._server is not None and self._server.listening
 
+    @property
     def is_paused(self) -> bool:
+        """服务处于暂停状态。"""
         return self._paused
 
+    @property
     def should_exit(self) -> bool:
+        """收到退出请求（装配层主循环据此结束进程）。"""
         return self._should_exit
 
-    def shutdown(self) -> None:
-        """完全退出（进程终止，托盘销毁）"""
-        self.logger.info("正在完全关闭服务...")
-        self._should_exit = True
-        self._running = False
+    async def restart(self) -> None:
+        """关停后重新启动（口令/开关/证书热更的生效路径，v4 _restart 同语义）。"""
+        await self._teardown_runtime()
         self._paused = False
+        await self.start()
 
-        with self._streaming_lock:
-            for conn in list(self._screen_streaming.keys()):
-                self._screen_streaming[conn] = False
-            self._screen_streaming.clear()
+    # ================================================================== 观测面
 
-        with self._client_lock:
-            for conn in list(self._clients):
-                self._shutdown_and_close(conn, "关闭服务")
-            self._clients.clear()
-            self._client_threads.clear()
+    def snapshot(self) -> HostSnapshot:
+        """UI 状态面板快照（实现 :class:`~rdc.ui.status_panel.HostStatsProvider`）。"""
+        encoder = self._pipeline.encoder if self._pipeline is not None else None
+        enc_stats = encoder.stats() if encoder is not None else None
+        return HostSnapshot(
+            running=self.is_running,
+            paused=self._paused,
+            active_connections=len(self._control_sessions),
+            subscriber_count=self._registry.count(),
+            bytes_sent_total=enc_stats.total_bytes if enc_stats else 0,
+            uptime_s=time.time() - self._start_time if self._start_time else 0.0,
+            encoder_quality=enc_stats.quality if enc_stats else None,
+            encoder_avg_kb=enc_stats.avg_bytes / 1024.0 if enc_stats else 0.0,
+            frames_encoded=enc_stats.frames if enc_stats else 0,
+        )
 
-        # 停止广播器
-        self._broadcaster.stop()
-
-        self._close_quietly(self._server_socket, "关闭服务(主端口)")
-        self._server_socket = None
-        self._close_quietly(self._control_socket, "关闭服务(控制端口)")
-        self._control_socket = None
-
-        try:
-            self._thread_pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            # 与 pause() 同理：保持宽捕获避免异常逸出中断退出流程，记录而非静默。
-            self.logger.debug("关闭服务: 关闭线程池异常", exc_info=True)
-
-        self.pid_manager.remove()
-        self.logger.info("✅ 服务已完全关闭，进程即将退出")
-
-    def get_client_count(self) -> int:
-        with self._client_lock:
-            return len(self._clients)
-
-    def get_stats(self) -> dict:
-        uptime = time.time() - self._stats['start_time'] if self._stats['start_time'] else 0
+    def get_stats(self) -> dict[str, Any]:
+        """诊断统计（v4 ``get_stats`` 键面延续：CLI/托盘用，UI 走 :meth:`snapshot`）。"""
+        snap = self.snapshot()
+        bc_stats = self._registry.broadcaster.stats()
         return {
-            **self._stats,
-            'uptime': uptime,
-            'active_connections': self.get_client_count(),
-            'rate_limiter_count': self._rate_limiter.get_connection_count(),
-            # ===== 编码统计（来自ScreenBroadcaster） =====
-            'encoder_stats': self._broadcaster.get_stats(),
-            'subscriber_count': self._broadcaster.subscriber_count(),
+            "start_time": self._start_time,
+            "uptime": snap.uptime_s,
+            "active_connections": snap.active_connections,
+            "subscriber_count": snap.subscriber_count,
+            "published_frames": bc_stats.published,
+            "total_dropped": bc_stats.total_dropped,
+            "bytes_sent_total": snap.bytes_sent_total,
+            "encoder_avg_kb": snap.encoder_avg_kb,
+            "frames_encoded": snap.frames_encoded,
+            "rate_limiter_count": self._auth.rate_connection_count(),
+            "banned_ips": self._auth.banlist.banned_count,
         }
 
-    # ========== v4.0.0：ScreenBroadcaster 单例（Zero-Copy 画面广播） ==========
+    # ================================================================== 证书
 
-    class _ScreenBroadcaster:
+    def _prepare_certificates(self) -> tuple[Path, Path]:
+        """解析服务端证书路径：用户证书（9.3）优先，缺省自签名（阶段 4 件）。
+
+        用户证书加载失败抛 :class:`~rdc.exceptions.TlsError`（**不回落自签名**，
+        S1 口径），由 :meth:`start` 捕获记为启动失败。
         """
-        全局单例画面广播器。
-        仅维护1个截图→差分→编码线程，编码后的帧通过引用计数
-        分发给所有活跃订阅客户端（Zero-Copy），解决多客户端CPU雪崩。
-        """
+        ensure_dirs()
+        s = self._settings
+        if s.tls_cert_path and s.tls_key_path:
+            bundle = load_user_cert_bundle(Path(s.tls_cert_path), Path(s.tls_key_path))
+            self._cert_bundle = bundle
+            status = check_expiry(bundle.not_before, bundle.not_after)
+            if status is not ExpiryStatus.VALID:
+                self._audit.cert_expiring(
+                    fingerprint_prefix=bundle.fingerprint[:23],
+                    remaining_days=max(0, (bundle.not_after - _now_utc()).days),
+                )
+            _LOG.info("host_service_user_cert_loaded", cert=str(bundle.cert_path))
+            return bundle.cert_path, bundle.key_path
+        self._cert_bundle = None
+        cert_path = cert_dir() / "cert.pem"
+        key_path = cert_dir() / "key.pem"
+        ensure_server_cert(cert_path, key_path)
+        return cert_path, key_path
 
-        def __init__(self, service: 'RemoteService', bandwidth_probe: BandwidthProbe):
-            self.service = service
-            self.logger = service.logger
-            self.bandwidth_probe = bandwidth_probe  # v4.0.1
-            self._subscribers: dict[socket.socket, dict] = {}
-            self._sub_lock = threading.Lock()
-            self._running = False
-            self._thread: threading.Thread | None = None
-            self._consecutive_failures = 0  # v4.0.1：连续失败计数器
-            self._quality_adjust_counter = 0  # v4.0.1：质量调整计数
-            # 编码统计
-            # avg_size 为浮点均值，故整体标注为 float 值字典。
-            self._stats: dict[str, float] = {
-                'frames_encoded': 0,
-                'current_quality': 0,
-                'avg_size': 0.0,
-                'total_size': 0,
-            }
+    # ================================================================== 采集/管线
 
-        def add_subscriber(self, conn: socket.socket) -> None:
-            """注册订阅者；首个订阅者启动广播线程"""
-            with self._sub_lock:
-                if conn not in self._subscribers:
-                    self._subscribers[conn] = {}
-                    self.logger.info(f"📡 新增画面订阅者，当前: {len(self._subscribers)}")
-            if not self._running:
-                self.start()
+    def _ensure_screen_source(self) -> None:
+        """生产采集源延后构造（测试注入则跳过）。"""
+        if self._source is None:
+            self._source = MssScreenSource()
 
-        def remove_subscriber(self, conn: socket.socket) -> None:
-            """注销订阅者；最后一个订阅者离开时停止广播线程"""
-            with self._sub_lock:
-                if conn in self._subscribers:
-                    del self._subscribers[conn]
-                    self.logger.info(f"📡 移除画面订阅者，当前: {len(self._subscribers)}")
-            if not self._subscribers and self._running:
-                self.stop()
+    def _ensure_pipeline(self) -> None:
+        """按当前 settings 构造广播管线（rater 以队列/丢帧信号自适应）。"""
+        if self._pipeline is not None:
+            return
+        assert self._source is not None
+        s = self._settings
+        self._pipeline = ScreenPipeline(
+            self._source,
+            broadcaster=self._registry.broadcaster,
+            framerate=FramerateController(min_fps=s.min_fps, max_fps=s.max_fps),
+            rater=AdaptiveRater(
+                initial_crf=_quality_to_crf(s.jpeg_quality), target_fps=float(s.max_fps)
+            ),
+            signals_provider=self._net_signals,
+        )
 
-        def start(self) -> None:
-            if self._running:
+    def _net_signals(self) -> RaterSignals:
+        """服务侧网络信号：RTT/丢包在 S→C 单向流上无测量源（v4 BandwidthProbe
+        的等效职责由 DropOldestQueue 背压统计承担，pipeline 内部补齐）。"""
+        return RaterSignals(rtt_ms=0.0, loss_rate=0.0)
+
+    def _on_new_subscriber(self) -> None:
+        """新画面订阅建立 → 请求关键帧（I 帧起解，防花屏）。"""
+        if self._pipeline is not None:
+            self._pipeline.request_keyframe()
+
+    def _on_subscriber_removed(self, subscriber_id: str, reason: str) -> None:
+        self._audit.conn_close(ip=subscriber_id, kind="screen", reason=reason)
+
+    # ================================================================== 会话：控制通道
+
+    async def _serve_control(self, channel: StreamChannel) -> None:
+        """控制会话主循环：消息分发（输入执行/心跳/流控/剪贴板）直到 EOF。"""
+        assert isinstance(channel, ControlSession)
+        ip = channel.client_ip
+        self._control_sessions.add(channel)
+        self._auth.on_auth_success(ip)
+        self._audit.conn_open(ip=ip, kind="control")
+        try:
+            while True:
+                msg = await channel.next_message()
+                if msg is None:
+                    break
+                await self._dispatch_control(channel, msg)
+                self._audit.maybe_flush()
+        finally:
+            self._control_sessions.discard(channel)
+            self._audit.conn_close(ip=ip, kind="control", reason="eof")
+            # 断连兜底：释放记账中的按键/鼠标键（v4 卡键病灶，D37 对面）。
+            self._reset_input()
+
+    async def _dispatch_control(self, channel: ControlSession, msg: Message) -> None:
+        """单条控制消息的分派（固定事件循环线程；输入注入为轻量同步 API）。"""
+        if isinstance(msg, MouseEvent):
+            self._apply_mouse(msg, channel.client_ip)
+        elif isinstance(msg, KeyEvent):
+            self._apply_key(msg, channel.client_ip)
+        elif isinstance(msg, Heartbeat):
+            if msg.kind is HeartbeatKind.PING:
+                await channel.send(Heartbeat(kind=HeartbeatKind.PONG, timestamp=msg.timestamp))
+        elif isinstance(msg, StreamControl):
+            self._apply_stream_control(msg)
+        elif isinstance(msg, ClipboardEvent):
+            await self._apply_clipboard(msg, channel.client_ip)
+        else:
+            _LOG.warning("control_unexpected_message", client=channel.client_ip, type=type(msg).__name__)
+
+    # -- 输入执行 ---------------------------------------------------------------
+
+    def _get_input_backend(self) -> InputBackend:
+        """输入后端懒构造（测试注入优先；首次触达按平台工厂选择）。"""
+        if self._input_backend is None:
+            self._input_backend = default_backend()
+        return self._input_backend
+
+    def _reset_input(self) -> None:
+        """断连兜底释放按键（契约保证幂等且无键按下时空操作，注入替身同样调用）。"""
+        if self._input_backend is not None:
+            try:
+                self._input_backend.reset()
+            except Exception as exc:  # InputControlError 等：兜底记录不静默（约束 6）
+                _LOG.error("input_reset_failed", error=repr(exc))
+
+    def _apply_mouse(self, ev: MouseEvent, ip: str) -> None:
+        """鼠标事件 → :class:`InputBackend`（坐标=远端虚拟桌面绝对坐标，D32）。"""
+        backend = self._get_input_backend()
+        button = _PROTO_BUTTON_TO_INPUT.get(ev.button)
+        try:
+            if ev.action in (MouseAction.MOVE, MouseAction.DRAG):
+                # DRAG 语义：按键态由 PRESS/RELEASE 维护，DRAG 仅移动光标。
+                backend.move_mouse(ev.x, ev.y)
+            elif ev.action is MouseAction.PRESS and button is not None:
+                backend.click(ev.x, ev.y, button, press=True)
+            elif ev.action is MouseAction.RELEASE and button is not None:
+                backend.click(ev.x, ev.y, button, press=False)
+            elif ev.action is MouseAction.CLICK and button is not None:
+                backend.click(ev.x, ev.y, button, press=True)
+                backend.click(ev.x, ev.y, button, press=False)
+            elif ev.action is MouseAction.SCROLL:
+                backend.scroll(ev.x, ev.y, 0, ev.scroll_delta)
+            else:
+                _LOG.warning("mouse_action_unsupported", client=ip, action=ev.action.name)
                 return
-            self._running = True
-            self._thread = threading.Thread(target=self._broadcast_loop, daemon=True, name="ScreenBroadcaster")
-            self._thread.start()
-            self.logger.info("📡 ScreenBroadcaster 广播线程已启动")
+        except Exception as exc:  # 单事件注入失败不断流，可观测（约束 6）
+            _LOG.error("mouse_inject_failed", client=ip, error=repr(exc))
+            return
+        self._audit.control(EVENTS.Ctrl.MOUSE, ip=ip, action=ev.action.name)
 
-        def stop(self) -> None:
-            self._running = False
-            if self._thread and self._thread.is_alive():
-                self._thread.join(timeout=2.0)
-            self._thread = None
+    def _apply_key(self, ev: KeyEvent, ip: str) -> None:
+        """键盘事件 → 后端（PRESS/RELEASE 带修饰键顺序，TYPE 走文本通道）。"""
+        backend = self._get_input_backend()
+        try:
+            if ev.action is KeyAction.TYPE:
+                backend.type_text(ev.text)
+            elif ev.action is KeyAction.PRESS:
+                for mod in ev.modifiers:  # v4 组合语义：先修饰键后主键
+                    backend.key_press(_MODIFIER_NAMES[mod])
+                backend.key_press(ev.key)
+            elif ev.action is KeyAction.RELEASE:
+                backend.key_release(ev.key)
+                for mod in reversed(ev.modifiers):  # 释放逆序
+                    backend.key_release(_MODIFIER_NAMES[mod])
+            else:
+                _LOG.warning("key_action_unsupported", client=ip, action=ev.action.name)
+                return
+        except Exception as exc:
+            _LOG.error("key_inject_failed", client=ip, error=repr(exc))
+            return
+        self._audit.control(EVENTS.Ctrl.KEY, ip=ip, action=ev.action.name)
 
-        def subscriber_count(self) -> int:
-            with self._sub_lock:
-                return len(self._subscribers)
+    # -- 流控 / 剪贴板 ----------------------------------------------------------
 
-        def has_subscriber(self, conn: socket.socket) -> bool:
-            """v4.0.3：判断连接是否仍在订阅画面流（供处理线程存活判定）"""
-            with self._sub_lock:
-                return conn in self._subscribers
+    def _apply_stream_control(self, msg: StreamControl) -> None:
+        """流控制：START/STOP 推流门控，CONFIG 帧率即时应用。"""
+        if msg.cmd is StreamCmd.START:
+            if self._stop_event is not None:
+                self._stop_event.clear()
+            if self._pipeline_task is None or self._pipeline_task.done():
+                assert self._pipeline is not None and self._stop_event is not None
+                self._pipeline_task = asyncio.get_running_loop().create_task(
+                    self._pipeline.run(stop=self._stop_event), name="pipeline"
+                )
+        elif msg.cmd is StreamCmd.STOP:
+            if self._stop_event is not None:
+                self._stop_event.set()
+        elif msg.cmd is StreamCmd.CONFIG and msg.config is not None:
+            cfg = msg.config
+            if cfg.max_fps and self._pipeline is not None:
+                self._pipeline.framerate.set_fps(cfg.max_fps)
+            if cfg.quality:
+                _LOG.info("stream_quality_hint_ignored_rater", quality=cfg.quality)
+                # v5 画质由 AdaptiveRater 按背压自适应（JPEG quality 语义与 CRF 不互通，
+                # 映射标定归阶段 10，禁止发明未验证参数——D24 口径）。
+        _LOG.debug("stream_control_applied", cmd=msg.cmd.name)
 
-        def get_stats(self) -> dict:
-            return dict(self._stats)
+    async def _apply_clipboard(self, ev: ClipboardEvent, ip: str) -> None:
+        """剪贴板写入本地（v4 线程内 ``tk.Tk()`` 崩溃病灶 B2 消除）。
 
-        def _broadcast_loop(self) -> None:
-            """全局唯一的截图→差分→编码→分发循环（v4.0.1：重试+带宽探测）"""
-            target_fps = self.service.config.get('max_fps', 30)
-            frame_interval = 1.0 / target_fps if target_fps > 0 else 0.033
+        ⚠️ 同步调用 ``pyperclip``（**不用** :func:`asyncio.to_thread`）：剪贴板
+        为低频事件路径，pyperclip 实为轻量 ctypes/COM 调用；to_thread 会占用
+        事件循环默认 executor，与 UI 测试同进程连跑时 loop 关停
+        （``shutdown_default_executor``）在 Qt 环境不泵送 → 死锁
+        （阶段 6 坑 t11 同族，阶段 9 实测定位）。
+        """
+        if ev.chunk_total > 1:
+            _LOG.info(
+                "clipboard_chunk_pending_stage8",
+                client=ip,
+                index=ev.chunk_index,
+                total=ev.chunk_total,
+            )
+            # 分块重组属文件传输协议面（阶段 8），本批只接受单块文本。
+            if ev.chunk_index != 0:
+                return
+        try:
+            _clipboard_copy(ev.text)
+        except Exception as exc:  # pyperclip 平台后端异常面不可枚举：记录不静默
+            _LOG.error("clipboard_write_failed", client=ip, error=repr(exc))
+            return
+        self._audit.control(EVENTS.Ctrl.CLIPBOARD, ip=ip, length=len(ev.text))
 
-            while self._running:
-                try:
-                    frame_start = time.time()
+    # ================================================================== 会话：画面通道
 
-                    # 截图
-                    img = self.service.capturer.capture()
-                    changed_blocks = self.service.differ.get_changed_blocks(img)
-                    screen_w, screen_h = self.service.capturer.get_screen_size()
-                    use_compression = self.service.config.get('enable_compression', True)
+    async def _serve_screen(self, channel: StreamChannel) -> None:
+        """画面会话：登记订阅 → 保持至 EOF → 注销（回收统一走 registry）。"""
+        assert isinstance(channel, ScreenSession)
+        sid = self._registry.register(channel)
+        self._audit.conn_open(ip=channel.client_ip, kind="screen", connection_id=sid)
+        try:
+            while True:
+                msg = await channel.next_message()
+                if msg is None:
+                    break
+                # 画面通道为 S→C 单向：收到消息仅心跳/诊断，无业务分派。
+                _LOG.debug("screen_inbound_ignored", subscriber=sid, type=type(msg).__name__)
+        finally:
+            await self._registry.unregister(sid, "eof")
 
-                    # 差分/全帧编码
-                    if changed_blocks is None or len(changed_blocks) > 100:
-                        img_data, quality, fmt = self.service.encoder.encode(img)
-                        packet = Packet.create_screen(
-                            img_data, screen_w, screen_h,
-                            quality, is_diff=False,
-                            offset_x=0, offset_y=0,
-                            compress=use_compression
-                        )
-                    else:
-                        cropped, (offset_x, offset_y) = self.service.differ.get_changed_region(img, changed_blocks)
-                        img_data, quality, fmt = self.service.encoder.encode(cropped)
-                        packet = Packet.create_screen(
-                            img_data, screen_w, screen_h,
-                            quality, is_diff=True,
-                            offset_x=offset_x, offset_y=offset_y,
-                            compress=use_compression
-                        )
+    # ================================================================== 认证/后台
 
-                    # Zero-Copy 分发：同一帧字节引用发送给所有订阅者
-                    frame_bytes = packet.to_bytes()
-                    self._stats['frames_encoded'] += 1
-                    self._stats['current_quality'] = quality
-                    self._stats['total_size'] += len(frame_bytes)
-                    self._stats['avg_size'] = self._stats['total_size'] / self._stats['frames_encoded']
+    def _on_auth_failed_hook(self, ip: str, channel: str) -> None:
+        # 认证失败原因按通道区分（画面通道为令牌无效/绑定不符）
+        reason = REASON_BAD_PASSWORD if channel == "control" else "token_invalid"
+        self._auth.on_auth_failure(ip, reason)
 
-                    # v4.0.1：记录带宽探测
-                    self.bandwidth_probe.record_send(len(frame_bytes))
+    async def _ban_cleanup_loop(self) -> None:
+        """到期封禁批清理（循环可被 stop_event 立即打断）。"""
+        assert self._stop_event is not None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=BAN_CLEANUP_INTERVAL_S)
+                return
+            except TimeoutError:
+                self._auth.cleanup_expired_bans()
 
-                    # v4.0.1：每30帧根据带宽动态调整编码质量
-                    self._quality_adjust_counter += 1
-                    if self._quality_adjust_counter >= 30:
-                        self._quality_adjust_counter = 0
-                        try:
-                            self.service.encoder.adjust_quality_by_bandwidth(
-                                self.bandwidth_probe, target_fps
-                            )
-                        except Exception as e:
-                            self.logger.debug(f"动态质量调整失败: {e}")
+    async def _teardown_runtime(self) -> None:
+        """停任务 → 关管线/订阅 → 停传输监听（幂等，pause/shutdown/restart 共用）。"""
+        if self._stop_event is not None:
+            self._stop_event.set()
+        for task in (self._pipeline_task, self._cleanup_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._pipeline_task = None
+        self._cleanup_task = None
+        await self._registry.shutdown()
+        if self._pipeline is not None:
+            self._pipeline.close()
+            self._pipeline = None
+        if self._server is not None:
+            await self._server.stop()
+            self._server = None
+        self._stop_event = None
 
-                    with self._sub_lock:
-                        dead_conns = []
-                        for conn in list(self._subscribers.keys()):
-                            try:
-                                conn.sendall(frame_bytes)
-                                self.service._stats['bytes_sent'] += len(frame_bytes)
-                            except Exception:
-                                dead_conns.append(conn)
-                        for conn in dead_conns:
-                            self._subscribers.pop(conn, None)
 
-                    # v4.0.1：成功后重置失败计数器
-                    self._consecutive_failures = 0
+# ---------------------------------------------------------------------------
+# 模块级小工具
+# ---------------------------------------------------------------------------
 
-                    elapsed = time.time() - frame_start
-                    if elapsed < frame_interval:
-                        time.sleep(frame_interval - elapsed)
-                    elif elapsed > frame_interval * 1.5:
-                        self.logger.debug(f"广播帧处理超时: {elapsed*1000:.0f}ms")
 
-                except Exception as e:
-                    self._consecutive_failures += 1
-                    self.logger.error(f"ScreenBroadcaster 广播错误(连续{self._consecutive_failures}次): {e}")
-                    # v4.0.1：连续失败超过5次，尝试重新初始化截图器
-                    if self._consecutive_failures > 5:
-                        try:
-                            self.logger.warning("连续截图失败，尝试重新初始化ScreenCapturer")
-                            self.service.capturer = ScreenCapturer()
-                            # v4.0.3：同步重置差分缓存，否则旧帧尺寸与新截图不匹配，
-                            # 会导致后续帧持续异常
-                            self.service.differ.reset()
-                            self._consecutive_failures = 0
-                            time.sleep(0.5)
-                        except Exception as reinit_err:
-                            self.logger.error(f"重新初始化ScreenCapturer失败: {reinit_err}")
-                            # 重新初始化仍失败，暂停5秒避免CPU空转
-                            time.sleep(5.0)
-                    else:
-                        time.sleep(0.05)
+def _quality_to_crf(quality: int) -> int:
+    """UI 画质分（越大越好，1-100）→ H.264 CRF 初值（越小越好）。
+
+    线性映射到标定区间 [18, 45]（STAGE5 §3.4 实测域）：quality=60 → CRF 28
+    （生产默认）；仅用作 AdaptiveRater 的初始 CRF，运行期由背压信号接管。
+    """
+    clamped = max(1, min(100, quality))
+    return round(45 - (clamped - 1) * (45 - 18) / 99)
+
+
+def _clipboard_copy(text: str) -> None:
+    """本地剪贴板写入（独立函数便于测试 monkeypatch）。"""
+    import pyperclip
+
+    pyperclip.copy(text)
+
+
+def _now_utc() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)

@@ -178,6 +178,11 @@ class Banlist:
 
     # ------------------------------------------------------------------ 观测
 
+    @property
+    def banned_count(self) -> int:
+        """当前封禁 IP 数（诊断/统计口径，不含到期未清理的）。"""
+        return len(self._bans)
+
     def snapshot(self) -> dict[str, object]:
         """当前状态快照（诊断/测试用；不含文件 IO）。"""
         return {

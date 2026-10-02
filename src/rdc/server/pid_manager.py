@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from rdc.config.paths import config_dir
 from rdc.exceptions import ServiceError
 from rdc.logger import get_logger
 
@@ -15,7 +16,9 @@ class PIDManager:
     
     def __init__(self, service_name: str):
         self.service_name = service_name
-        self.pid_file = Path.home() / ".remote_desktop" / f"{service_name}.pid"
+        # 阶段 9：路径收敛到 rdc.config.paths（原 v4 焊死 Path.home()，
+        # 测试无法重定向会污染真实 HOME；set_override_root 后自动跟随 tmp 目录）
+        self.pid_file = Path(config_dir()) / f"{service_name}.pid"
         self.logger = get_logger()
     
     def write(self) -> None:

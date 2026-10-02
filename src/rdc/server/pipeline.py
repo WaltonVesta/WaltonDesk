@@ -166,6 +166,11 @@ class ScreenPipeline:
     # -- 公共 API ---------------------------------------------------------------
 
     @property
+    def framerate(self) -> FramerateController:
+        """帧率决策器（装配层接线用：StreamControl CONFIG 帧率/输入节拍同步）。"""
+        return self._framerate
+
+    @property
     def encoder(self) -> VideoEncoder | None:
         """首帧后的编码器实例（诊断/测试）。"""
         return self._encoder

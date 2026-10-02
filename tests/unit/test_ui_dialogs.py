@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from rdc.config.settings import Settings
 from rdc.ui.app import create_app, event_loop
@@ -33,26 +33,50 @@ def qapp():
     return create_app([])
 
 
-def drive(qapp, coro_fn):  # noqa: ANN001, ANN201 - qasync 驱动同步测试
-    """在 qasync 循环上跑协程到完成（Qt 事件同步泵送）。"""
+def _close_dialogs(qapp) -> None:  # noqa: ANN001
+    """关闭当前**可见**的顶层对话框（阶段 9 加固：防跨轮残留误命中）。"""
+    for w in qapp.topLevelWidgets():
+        if isinstance(w, QDialog) and w.isVisible():
+            w.close()
+
+
+def drive(qapp, coro_fn, *, timeout_s: float = 20.0):  # noqa: ANN001, ANN201 - qasync 驱动同步测试
+    """在 qasync 循环上跑协程到完成（Qt 事件同步泵送）。
+
+    阶段 9 测试基建加固（消除阶段 6 遗留的偶发死锁——本批新增用例改变时序后暴露）：
+
+    1. **总超时**：协程包 :func:`asyncio.wait_for`，把"永久卡死"转为确定性失败；
+    2. **入口清理**：关闭上一轮残留的可见对话框；
+    3. **出口清理**：本轮对话框先关再 :meth:`loop.close`——旧写法里对话框的
+       ``finished`` future 随已关闭循环留存，下一轮 :func:`_click_widget` 按
+       ``isinstance`` 误命中它，点击等于向死循环投递结果，新协程永久等待。
+    """
+    _close_dialogs(qapp)
     loop = event_loop(qapp)
     try:
-        return loop.run_until_complete(coro_fn())
+        return loop.run_until_complete(asyncio.wait_for(coro_fn(), timeout=timeout_s))
     finally:
+        _close_dialogs(qapp)
         loop.close()
 
 
-def _click_widget(qapp, widget_cls, action) -> None:  # noqa: ANN001
-    """下一轮泵送时对新出现的对话框执行 action。"""
+def _click_widget(qapp, widget_cls, action, *, tries: int = 300) -> None:  # noqa: ANN001
+    """下一轮泵送时对**新出现的可见**对话框执行 action。
 
-    def _do() -> None:
+    阶段 9 加固：可见性过滤（跳过上一轮残留的隐藏件）+ 轮询有界
+    （300×10ms 上限，超时静默放弃——由测试断言确定性失败，不再挂死循环）。
+    """
+
+    def _do(remaining: int) -> None:
         for w in qapp.topLevelWidgets():
-            if isinstance(w, widget_cls):
+            if isinstance(w, widget_cls) and w.isVisible():
                 action(w)
                 return
-        QTimer.singleShot(10, lambda: _click_widget(qapp, widget_cls, action))
+        if remaining <= 0:
+            return
+        QTimer.singleShot(10, lambda: _do(remaining - 1))
 
-    QTimer.singleShot(10, _do)
+    QTimer.singleShot(10, lambda: _do(tries))
 
 
 def _raises_in_worker(fn) -> bool:  # noqa: ANN001
