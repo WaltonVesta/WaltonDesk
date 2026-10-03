@@ -56,7 +56,7 @@ def _to_v4(c: dict[str, Any]) -> None:
 def _to_v5(c: dict[str, Any]) -> None:
     """v4→v5：SHA256 哈希失效清空 + 移除旧 TLS 手工配置 + 自动生成标记。"""
     if c.get("password_hash"):
-        c["password_hash"] = ""
+        c["password_hash"] = ""  # nosec B105 -- 清空赋值（v4 SHA256 哈希失效），非硬编码凭据
         get_logger("config.migration").warning(
             "检测到旧版 SHA256 密码哈希已清除，请用 --set-password 重设"
         )

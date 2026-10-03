@@ -210,7 +210,7 @@ class H264Encoder(VideoEncoder):
 
         t0 = time.perf_counter()
         ctx = self._ctx
-        assert ctx is not None  # _open_codec 成功后恒成立
+        assert ctx is not None  # nosec B101 -- _open_codec 成功后恒成立（内部不变量，非外部输入校验）
         video_frame = self._bgra_to_frame(frame)
         if force_keyframe or self._force_next_keyframe:
             video_frame.pict_type = av.video.frame.PictureType.I

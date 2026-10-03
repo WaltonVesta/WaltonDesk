@@ -42,8 +42,8 @@ def get_local_ip_v6(dns_servers: list[str] | None = None) -> str | None:
             # 过滤链路本地地址
             if not ip.startswith('fe80::'):
                 return ip
-        except Exception:
-            continue
+        except Exception:  # 探测面异常不可枚举（平台差异），轮询语义下继续下一网关
+            continue  # nosec B112 -- 多 DNS 网关逐一探测属设计行为；本模块为 v4 遗留面，异常收窄与重构挂阶段 10
     
     return None
 

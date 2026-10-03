@@ -127,8 +127,8 @@ class AutostartManager:
                 f.write(plist_content)
             
             # 加载服务
-            import subprocess
-            subprocess.run(['launchctl', 'load', str(plist_file)], check=True)
+            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell），无外部输入注入面
+            subprocess.run(['launchctl', 'load', str(plist_file)], check=True)  # nosec B603 B607 -- argv 固定列表；plist_file 为应用自写路径
             self.logger.info("macOS开机自启动已安装")
             return True
         except Exception as e:
@@ -140,8 +140,8 @@ class AutostartManager:
         try:
             plist_file = Path.home() / "Library" / "LaunchAgents" / f"{self.service_name}.plist"
             if plist_file.exists():
-                import subprocess
-                subprocess.run(['launchctl', 'unload', str(plist_file)], check=True)
+                import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
+                subprocess.run(['launchctl', 'unload', str(plist_file)], check=True)  # nosec B603 B607 -- argv 固定列表；路径为应用自写
                 plist_file.unlink()
                 self.logger.info("macOS开机自启动已卸载")
             return True
@@ -173,9 +173,9 @@ WantedBy=default.target'''
                 f.write(service_content)
             
             # 启用服务
-            import subprocess
-            subprocess.run(['systemctl', '--user', 'enable', str(service_file.name)], check=True)
-            subprocess.run(['systemctl', '--user', 'start', str(service_file.name)], check=True)
+            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
+            subprocess.run(['systemctl', '--user', 'enable', str(service_file.name)], check=True)  # nosec B603 B607 -- argv 固定；service_file.name 应用自写
+            subprocess.run(['systemctl', '--user', 'start', str(service_file.name)], check=True)  # nosec B603 B607 -- 同上
             self.logger.info("Linux开机自启动已安装")
             return True
         except Exception as e:
@@ -187,9 +187,9 @@ WantedBy=default.target'''
         try:
             service_file = Path.home() / ".config" / "systemd" / "user" / f"{self.service_name}.service"
             if service_file.exists():
-                import subprocess
-                subprocess.run(['systemctl', '--user', 'stop', service_file.name], check=True)
-                subprocess.run(['systemctl', '--user', 'disable', service_file.name], check=True)
+                import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
+                subprocess.run(['systemctl', '--user', 'stop', service_file.name], check=True)  # nosec B603 B607 -- argv 固定；service_file.name 应用自写
+                subprocess.run(['systemctl', '--user', 'disable', service_file.name], check=True)  # nosec B603 B607 -- 同上
                 service_file.unlink()
                 self.logger.info("Linux开机自启动已卸载")
             return True

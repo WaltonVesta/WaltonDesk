@@ -207,7 +207,7 @@ class HostService:
         self._ensure_screen_source()
         self._ensure_pipeline()
         self._stop_event = asyncio.Event()
-        assert self._pipeline is not None and self._stop_event is not None
+        assert self._pipeline is not None and self._stop_event is not None  # nosec B101 -- 内部不变量：两件资源紧前构造
         loop = asyncio.get_running_loop()
         self._pipeline_task = loop.create_task(self._pipeline.run(stop=self._stop_event), name="pipeline")
         self._cleanup_task = loop.create_task(self._ban_cleanup_loop(), name="ban-cleanup")
@@ -343,7 +343,7 @@ class HostService:
         """按当前 settings 构造广播管线（rater 以队列/丢帧信号自适应）。"""
         if self._pipeline is not None:
             return
-        assert self._source is not None
+        assert self._source is not None  # nosec B101 -- 内部不变量：调用点均先经 _ensure_screen_source
         s = self._settings
         self._pipeline = ScreenPipeline(
             self._source,
@@ -372,7 +372,7 @@ class HostService:
 
     async def _serve_control(self, channel: StreamChannel) -> None:
         """控制会话主循环：消息分发（输入执行/心跳/流控/剪贴板）直到 EOF。"""
-        assert isinstance(channel, ControlSession)
+        assert isinstance(channel, ControlSession)  # nosec B101 -- TransportServer 按端口交付对应会话类型
         ip = channel.client_ip
         self._control_sessions.add(channel)
         self._auth.on_auth_success(ip)
@@ -477,7 +477,7 @@ class HostService:
             if self._stop_event is not None:
                 self._stop_event.clear()
             if self._pipeline_task is None or self._pipeline_task.done():
-                assert self._pipeline is not None and self._stop_event is not None
+                assert self._pipeline is not None and self._stop_event is not None  # nosec B101 -- 内部不变量：管线与停件事件仅在 start 后到达此处
                 self._pipeline_task = asyncio.get_running_loop().create_task(
                     self._pipeline.run(stop=self._stop_event), name="pipeline"
                 )
@@ -524,7 +524,7 @@ class HostService:
 
     async def _serve_screen(self, channel: StreamChannel) -> None:
         """画面会话：登记订阅 → 保持至 EOF → 注销（回收统一走 registry）。"""
-        assert isinstance(channel, ScreenSession)
+        assert isinstance(channel, ScreenSession)  # nosec B101 -- TransportServer 按端口交付对应会话类型
         sid = self._registry.register(channel)
         self._audit.conn_open(ip=channel.client_ip, kind="screen", connection_id=sid)
         try:
@@ -546,7 +546,7 @@ class HostService:
 
     async def _ban_cleanup_loop(self) -> None:
         """到期封禁批清理（循环可被 stop_event 立即打断）。"""
-        assert self._stop_event is not None
+        assert self._stop_event is not None  # nosec B101 -- 内部不变量：任务仅在 start 成功（stop_event 已建）后派生
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=BAN_CLEANUP_INTERVAL_S)

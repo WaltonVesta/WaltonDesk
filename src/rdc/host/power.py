@@ -3,7 +3,7 @@
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 -- 固定 argv 系统管理命令（锁屏/重启/关机，不经 shell），无外部输入注入面；关机/重启调用点 UI 二次确认兜底
 import sys
 
 from rdc.logging import get_logger
@@ -36,11 +36,11 @@ class SystemHelper:
                 ctypes.windll.user32.LockWorkStation()
                 return True
             elif self.is_macos():
-                subprocess.run(['pmset', 'displaysleepnow'], check=True)
+                subprocess.run(['pmset', 'displaysleepnow'], check=True)  # nosec B603 B607 -- argv 固定列表，无外部输入
                 return True
             elif self.is_linux():
                 # 尝试gnome/unity
-                subprocess.run(['gnome-screensaver-command', '-l'], check=True)
+                subprocess.run(['gnome-screensaver-command', '-l'], check=True)  # nosec B603 B607 -- argv 固定列表，无外部输入
                 return True
         except Exception as e:
             self.logger.error(f"锁屏失败: {e}")
@@ -50,11 +50,11 @@ class SystemHelper:
         """重启"""
         try:
             if self.is_windows():
-                subprocess.run(['shutdown', '/r', '/t', '1'], check=True)
+                subprocess.run(['shutdown', '/r', '/t', '1'], check=True)  # nosec B603 B607 -- argv 固定列表；产品功能，调用点二次确认
             elif self.is_macos():
-                subprocess.run(['sudo', 'shutdown', '-r', 'now'], check=True)
+                subprocess.run(['sudo', 'shutdown', '-r', 'now'], check=True)  # nosec B603 B607 -- 同上
             elif self.is_linux():
-                subprocess.run(['sudo', 'reboot'], check=True)
+                subprocess.run(['sudo', 'reboot'], check=True)  # nosec B603 B607 -- 同上
             return True
         except Exception as e:
             self.logger.error(f"重启失败: {e}")
@@ -64,9 +64,9 @@ class SystemHelper:
         """关机"""
         try:
             if self.is_windows():
-                subprocess.run(['shutdown', '/s', '/t', '1'], check=True)
+                subprocess.run(['shutdown', '/s', '/t', '1'], check=True)  # nosec B603 B607 -- argv 固定列表；产品功能，调用点二次确认
             elif self.is_macos() or self.is_linux():
-                subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=True)
+                subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=True)  # nosec B603 B607 -- 同上
             return True
         except Exception as e:
             self.logger.error(f"关机失败: {e}")

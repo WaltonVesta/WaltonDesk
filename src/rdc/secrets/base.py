@@ -15,7 +15,7 @@ from typing import Protocol, runtime_checkable
 __all__ = ["STORED_PASSWORD_KEY", "SecretStore"]
 
 #: v4 遗留单密码迁移与新写入统一使用的键名。
-STORED_PASSWORD_KEY = "saved_password"
+STORED_PASSWORD_KEY = "saved_password"  # nosec B105 -- SecretStore 键名常量，非凭据值
 
 
 @runtime_checkable

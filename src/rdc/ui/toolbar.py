@@ -64,7 +64,7 @@ class Toolbar(QWidget):
         if default_host:
             self._host.setCurrentText(default_host)
         edit = self._host.lineEdit()
-        assert edit is not None  # setEditable(True) 后 lineEdit() 恒非空
+        assert edit is not None  # nosec B101 -- setEditable(True) 后 lineEdit() 恒非空（Qt API 不变量）
         edit.setPlaceholderText("IP 地址")
         edit.returnPressed.connect(self._emit_connect)
 

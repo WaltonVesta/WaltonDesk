@@ -336,7 +336,7 @@ class ClientController:
 
     async def _control_recv_loop(self) -> None:
         control = self._control
-        assert control is not None
+        assert control is not None  # nosec B101 -- 内部不变量：接收环/心跳仅在 _open_session 成功后创建
         try:
             while True:
                 msg = await control.next_message()
@@ -365,7 +365,7 @@ class ClientController:
 
     async def _screen_recv_loop(self) -> None:
         screen = self._screen
-        assert screen is not None
+        assert screen is not None  # nosec B101 -- 内部不变量：接收环仅在 _open_session 成功后创建
         try:
             while True:
                 msg = await screen.next_message()
@@ -384,7 +384,7 @@ class ClientController:
 
     async def _send_ping(self) -> None:
         control = self._control
-        assert control is not None
+        assert control is not None  # nosec B101 -- 内部不变量：接收环/心跳仅在 _open_session 成功后创建
         await control.send(Heartbeat(kind=HeartbeatKind.PING, timestamp=time.time()))
 
     # ================================================================== 帧处理
