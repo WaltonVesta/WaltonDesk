@@ -148,11 +148,6 @@ class TestPreCompressedFlag:
         ) + b"x")
         assert Packet.from_bytes(bytes(raw)) is None
 
-    def test_create_screen_marks_pre_compressed(self) -> None:
-        pkt = Packet.create_screen(b"\xff\xd8\xff\xe0fakejpeg", 100, 100, 60, compress=True)
-        assert pkt.flags & C.PKT_FLAG_PRE_COMPRESSED
-        assert not pkt.flags & C.PKT_FLAG_COMPRESSED
-
     def test_unknown_high_flags_rejected(self) -> None:
         raw = struct.pack(
             C.HEADER_FORMAT, C.PROTOCOL_MAGIC, C.PROTOCOL_VERSION_V5,
@@ -232,6 +227,31 @@ class TestCrcCoverage:
         assert crc == zlib.crc32(wire) & 0xFFFFFFFF
         assert zlib.decompress(wire) == b"z" * 500
 
+    def test_crc_tampered_rejected_without_hmac(self) -> None:
+        """无 HMAC 会话下，CRC 仍是完整性防线：篡改载荷末字节必拒。"""
+        frame = bytearray(_mk(b"payload" * 10).to_bytes())
+        frame[-1] ^= 0xFF
+        assert Packet.from_bytes(bytes(frame)) is None
+
+    def test_two_frames_concatenated(self) -> None:
+        """TCP 粘连两帧：依次弹出，顺序与内容都不错位。"""
+        a, b = _mk(b"first-frame"), _mk(b"second-frame")
+        buf = PacketBuffer()
+        buf.append(a.to_bytes() + b.to_bytes())
+        assert buf.pop_packet() == a
+        assert buf.pop_packet() == b
+        assert buf.pop_packet() is None  # 缓冲区已空
+
+    def test_partial_frame_waits_for_rest(self) -> None:
+        """半包：不足一帧时返回 None 不清缓冲，补齐后可完整弹出。"""
+        pkt = _mk(b"x" * 200)
+        raw = pkt.to_bytes()
+        buf = PacketBuffer()
+        buf.append(raw[:10])
+        assert buf.pop_packet() is None
+        buf.append(raw[10:])
+        assert buf.pop_packet() == pkt
+
     def test_value_equality_after_round_trip(self) -> None:
         pkt = _mk(b"abc")
         assert Packet.from_bytes(pkt.to_bytes()) == pkt
@@ -248,20 +268,6 @@ class TestCrcCoverage:
         a, b = _mk(b"same"), _mk(b"same")
         assert hash(a) == hash(b)
         assert len({a, b}) == 1
-
-
-class TestLegacySurfaceGuards:
-    """v4 遗留面的越界防御（阶段 4/5 删除前锁定行为）。"""
-
-    def test_parse_screen_rejects_oversized_meta_len(self) -> None:
-        payload = struct.pack(">I", 10**6) + b"short"
-        pkt = Packet(0x01, payload, C.PKT_FLAG_NONE)
-        with pytest.raises(ValueError, match="meta 长度越界"):
-            pkt.parse_screen()
-
-    def test_parse_screen_rejects_non_screen_type(self) -> None:
-        with pytest.raises(ValueError):
-            _mk().parse_screen()
 
 
 class TestCompressFallback:

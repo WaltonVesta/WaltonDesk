@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-from rdc.logger import get_logger
+from rdc.logging import get_logger
 
 
 class SystemHelper:

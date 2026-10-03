@@ -246,6 +246,23 @@ class TestStateMachine:
         # 首连 1 次 + 环内至多 1~2 次，远小于 50
         assert len(FakeControl.instances) - calls_before <= 4
 
+    async def test_reconnect_guard_when_no_running_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 解释器/GC 拆环阶段：判死时若无运行中循环，直接落定断开，绝不
+        # ensure_future 起环（否则协程无人 await，退出期报 never awaited）。
+        ctl, _ = make_ctrl(Settings(auto_reconnect=True))
+        await connect_ok(ctl)
+
+        def _boom() -> asyncio.AbstractEventLoop:
+            raise RuntimeError("no running event loop")
+
+        with monkeypatch.context() as m:
+            m.setattr(asyncio, "get_running_loop", _boom)
+            ctl._on_link_dead("eof")  # noqa: SLF001
+        assert ctl.state == "disconnected"
+        assert ctl._reconnect_task is None  # noqa: SLF001
+
     async def test_no_auto_reconnect_disconnected_directly(self) -> None:
         FakeControl.connect_error = ConnectionRefusedError("拒绝")
         ctl, _ = make_ctrl(Settings(auto_reconnect=False))
@@ -509,6 +526,7 @@ class TestFramePipeline:
 
     async def test_no_image_factory_raises_connection_error(self) -> None:
         ctl = cc.ClientController(coalescer=InputCoalescer(clock=FakeClock()), clock=FakeClock())
+        _LIVE_CTLS.append(ctl)  # 直接构造也要登记，否则收尾不拆会话、任务泄漏到退出期
         await connect_ok(ctl)
         # 未注入 image_factory：解码后的构造抛 ConnectionError（装配缺陷显式暴露，不静默）
         with pytest.raises(ConnectionError, match="image_factory"):

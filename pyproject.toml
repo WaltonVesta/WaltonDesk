@@ -170,10 +170,10 @@ ignore = [
 "src/rdc/input/**" = ["F401"]
 "src/rdc/host/**" = ["F401"]
 "src/rdc/__init__.py" = ["F401"]
-# N801/N806：DATA_BLOB、DCX_WINDOW、PROCESS_QUERY_LIMITED_INFORMATION、
-# MAX_BAN_RECORDS 等是 Win32 API 原名或协议常量，改成小写反而与系统 API 不符、
-# 降低可读性。仅对含平台原生调用的模块豁免命名规则。
-"src/rdc/config/_v4_config.py" = ["N801"]   # DATA_BLOB (DPAPI 结构体)
+# N801/N806：DCX_WINDOW、PROCESS_QUERY_LIMITED_INFORMATION 等是 Win32 API
+# 原名，改成小写反而与系统 API 不符、降低可读性。仅对含平台原生调用的模块
+# 豁免命名规则。
+# ✅(phase-9): 原 "src/rdc/config/_v4_config.py" N801 豁免随该文件删除移除
 "src/rdc/input/dpi.py" = ["N806"]            # DCX_WINDOW 等 Win32 常量
 "src/rdc/server/pid_manager.py" = ["N806"]   # PROCESS_QUERY_LIMITED_INFORMATION
 # ✅(phase-9): 原 rdc/server/service.py（v4 线程模型）已随批 3 拆除删除，本豁免移除
@@ -295,9 +295,8 @@ ignore_missing_imports = true
 #   TODO(phase-1):  rdc.client.ratelimit 为纯算法模块，阶段 1 补注解后即可移除
 [[tool.mypy.overrides]]
 module = [
-    # 根级
-    "rdc.constants",        # ⚠️ 阶段 4/5 调用点切到 protocol/constants 后整体删除本文件残留常量时移除
-    "rdc.config._v4_config",
+    # ✅(phase-9): 移除 rdc.constants（根级双份常量已删，唯一消费方迁本地常量）
+    # ✅(phase-9): 移除 rdc.config._v4_config（v4 配置层已删，v5 一律 Settings）
     # ✅(phase-4): 移除 rdc.transport.{control_channel,screen_channel,heartbeat,reconnect}
     #   （asyncio 重写完成，全部走全局 strict；新 transport 模块一律不加入本清单）
     # server（阶段 3-9 拆分为 auth/broadcaster/banlist）
@@ -306,8 +305,9 @@ module = [
     #   补类型注解后全局 strict 实测 0 error，兑现 TODO(phase-3/4)）
     # ✅(phase-5): 移除 rdc.capture.{diff,mss_source}、rdc.encoding.jpeg
     # ✅(phase-6): 移除 rdc.capture.framerate（v5 重写补全注解）
-    # client（阶段 1 补注解后移除）
-    "rdc.client.ratelimit",
+    # client
+    # ✅(phase-9): 移除 rdc.client.ratelimit（批 4 补全注解，全局 strict 0 error，
+    #   兑现 TODO(phase-1)）
     # ✅(phase-7): 移除 rdc.input.{mouse,keyboard,dpi,modifiers}
     #   （v4 四件已删除：mouse/keyboard 语义并入 InputBackend 实现 +
     #    legacy_pyautogui 回退；DPIAdapter/ModifierState 无 v5 消费方，
@@ -374,9 +374,7 @@ parallel = true
 omit = [
     "src/rdc/protocol/pb/*",  # protoc 生成物
     "src/rdc/__main__.py",
-    # TODO(phase-9): v4 兼容遗留层。个人版策略下不再扩展（2026-09-22 决定）；
-    # 唯一消费方 service.py（v4 运行时）阶段 9 拆除时本文件一并删除。
-    "src/rdc/config/_v4_config.py",
+    # ✅(phase-9): 原 omit "src/rdc/config/_v4_config.py" 随该文件删除移除
 ]
 
 [tool.coverage.report]

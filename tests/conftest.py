@@ -11,22 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from rdc.config import _v4_config, paths
+from rdc.config import paths
 from rdc.config import settings as settings_mod
-
-
-@pytest.fixture
-def uninitialized_config() -> _v4_config.Config:
-    """返回一个**未初始化**的 Config 实例（不触碰真实 home 目录）。
-
-    ``Config.__new__`` 被重写为单例，调用 ``Config()`` 会触发 ``_initialize``
-    并向 ``~/.remote_desktop/config.json`` 写文件——单元测试绝不能污染真实
-    home。这里用 ``object.__new__`` 绕过自定义 ``__new__``，得到裸实例。
-
-    仅用于测试 ``_migrate_config`` 这类**不依赖实例状态**的纯逻辑方法。
-    需要真实加载/保存行为的测试请用 ``tmp_config``（阶段 2 补充）。
-    """
-    return object.__new__(_v4_config.Config)
 
 
 @pytest.fixture(scope="session", autouse=True)

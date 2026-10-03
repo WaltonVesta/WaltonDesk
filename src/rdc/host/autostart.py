@@ -10,7 +10,7 @@ import platform
 import sys
 from pathlib import Path
 
-from rdc.logger import get_logger
+from rdc.logging import get_logger
 
 
 class AutostartManager:

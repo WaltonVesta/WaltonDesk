@@ -16,7 +16,7 @@ import pytest
 
 import rdc.capture.mss_source as mss_module
 from rdc.capture.monitor import MonitorNotFoundError
-from rdc.capture.mss_source import MssScreenSource, ScreenCapturer
+from rdc.capture.mss_source import MssScreenSource
 from rdc.exceptions import ScreenCaptureError
 
 # 假显示器布局：两块 320x240 横排 → 虚拟全屏 640x240
@@ -247,43 +247,3 @@ class TestStatsAndSwitch:
         src = MssScreenSource()
         src.close()
         assert fake_backend["backend"].closed
-
-
-class TestV4Wrapper:
-    """v4 兼容外壳 ScreenCapturer（service.py 的 import 面）。"""
-
-    def test_capture_returns_pil_rgb(self, fake_backend: dict[str, Any]) -> None:
-        cap = ScreenCapturer()
-        img = cap.capture()
-        assert img.mode == "RGB" and img.size == (320, 240)  # monitor=1 默认物理屏
-        cap.close()
-
-    def test_get_screen_size(self, fake_backend: dict[str, Any]) -> None:
-        cap = ScreenCapturer()
-        assert cap.get_screen_size() == (320, 240)
-        # 关闭后触发异常路径 → v4 历史兜底 (1920, 1080)（仅此外壳保留的行为）
-        cap.close()
-        assert cap.get_screen_size() == (1920, 1080)
-
-    def test_get_monitors_v4_dict(self, fake_backend: dict[str, Any]) -> None:
-        cap = ScreenCapturer()
-        mons = cap.get_monitors()
-        assert len(mons) == 2
-        assert mons[0] == {"left": 0, "top": 0, "width": 320, "height": 240}
-        cap.close()
-
-    def test_set_monitor_semantics(self, fake_backend: dict[str, Any]) -> None:
-        cap = ScreenCapturer()
-        cap.set_monitor(2)
-        assert cap.monitor == 2
-        assert cap.get_screen_size() == (320, 240)
-        cap.set_monitor(99)  # 越界：v4 语义静默、保持原屏（绝不抛错）
-        assert cap.monitor == 2
-        cap.set_monitor(0)  # 非法：v4 语义忽略
-        assert cap.monitor == 2
-        cap.close()
-
-    def test_monitor_floor_at_one(self, fake_backend: dict[str, Any]) -> None:
-        cap = ScreenCapturer(monitor=-5)
-        assert cap.monitor == 1
-        cap.close()

@@ -27,7 +27,6 @@ from typing import Final
 
 from rdc.client.ratelimit import RateLimiter
 from rdc.config.settings import Settings
-from rdc.constants import CONNECTION_RATE_LIMIT
 from rdc.logging import get_logger
 from rdc.server.audit import AuditLogger
 from rdc.server.banlist import Banlist
@@ -35,6 +34,10 @@ from rdc.server.banlist import Banlist
 __all__ = ["HostAuth", "REASON_BANNED", "REASON_BLACKLISTED", "REASON_NOT_WHITELISTED", "REASON_RATE_LIMITED"]
 
 _LOG = get_logger("server.auth")
+
+#: 每秒新建连接上限（原 ``rdc.constants.CONNECTION_RATE_LIMIT``，阶段 9 双份
+#: 常量清理时迁入唯一消费方；v4 同值）。
+CONNECTION_RATE_LIMIT: Final = 5
 
 #: 准入拒绝原因代码串（审计 ``conn.rejected.reason`` 值域，禁止传敏感文本）。
 REASON_BANNED: Final = "banned"

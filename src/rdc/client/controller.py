@@ -214,8 +214,13 @@ class ClientController:
         self._user_disconnect = True
         if self._reconnect is not None:
             self._reconnect.stop()
-        if self._reconnect_task is not None and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
+        ring_task = self._reconnect_task
+        if ring_task is not None and not ring_task.done():
+            ring_task.cancel()
+            # 必须 await：被 cancel 却从未开始执行的协程会在 GC 时报
+            # "coroutine was never awaited"（重连环在退避 sleep 中被打断即此）。
+            with contextlib.suppress(asyncio.CancelledError):
+                await ring_task
         await self._teardown()
         self._password_holder = None
         self._set_state("disconnected")
@@ -506,7 +511,17 @@ class ClientController:
     # ================================================================== 重连
 
     def _start_reconnect_loop(self) -> None:
-        """进入重连环：后台跑 ReconnectController，耗尽仍未成功 → 落定断开。"""
+        """进入重连环：后台跑 ReconnectController，耗尽仍未成功 → 落定断开。
+
+        守卫：无运行中事件循环（解释器/GC 拆环阶段的收尾回调）直接放弃
+        ——此时 ``ensure_future`` 会抛 "no running event loop" 并留下从未
+        被 await 的协程，属正常销毁路径而非链路死亡，无需重连。
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._set_state("disconnected")
+            return
         self._set_state("reconnecting")
         self._reconnect = ReconnectController(
             self._reconnect_attempt,

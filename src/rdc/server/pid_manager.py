@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rdc.config.paths import config_dir
 from rdc.exceptions import ServiceError
-from rdc.logger import get_logger
+from rdc.logging import get_logger
 
 
 class PIDManager:

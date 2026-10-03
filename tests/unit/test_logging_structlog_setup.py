@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from rdc import logger as legacy_shim
 from rdc.logging import configure_logging, get_logger
 from rdc.logging.setup import strip_emoji
 
@@ -77,10 +76,6 @@ class TestStdlibCompatPath:
         events = {r["event"] for r in _lines(log_file)}
         assert {f"method-{m}" for m in ("debug", "info", "warning", "error", "exception")} <= events
 
-    def test_legacy_shim_forwards(self, log_file: Path) -> None:
-        legacy_shim.get_logger().error("经 rdc.logger shim 写入")
-        assert any("shim" in r["event"] for r in _lines(log_file))
-
 
 class TestConfigureIdempotent:
     def test_reconfigure_does_not_duplicate_handlers(self, log_file: Path) -> None:
@@ -93,9 +88,6 @@ class TestConfigureIdempotent:
         root = configure_logging("ERROR")
         console = [h for h in root.handlers if type(h).__name__ == "StreamHandler"]
         assert console and console[0].level == logging.ERROR
-
-    def test_setup_logger_alias_works(self, log_file: Path) -> None:
-        assert legacy_shim.setup_logger("INFO") is logging.getLogger("rdc")
 
 
 class TestStripEmojiProcessor:

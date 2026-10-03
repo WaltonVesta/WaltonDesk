@@ -22,18 +22,15 @@ v5 相对 v4 的变化（范围调整后无 v4 兼容层，见 PROGRESS.md）：
 - 魔数重同步修复：v4 遇"半截魔数"（如 ``RDP`` 先到）会误清整个缓冲区丢数据，
   v5 保留可能是魔数前缀的尾部字节。
 
-v4 遗留 JSON/屏幕包辅助（``create_json``/``create_screen`` 等）原样保留，
-供阶段 4/5 重写前的存量调用方使用；新代码一律走 :mod:`rdc.protocol.codec`。
+载荷编解码一律走 :mod:`rdc.protocol.codec`（Protobuf 领域消息）；本模块
+v4 遗留的 JSON/屏幕包辅助方法已随阶段 9 批 4 遗留面清理删除。
 """
 
 from __future__ import annotations
 
-import json
 import struct
-import time
 import zlib
-from hashlib import sha256
-from typing import Any, Final
+from typing import Final
 
 from rdc.exceptions import HmacVerificationError, ProtocolError
 from rdc.logging import get_logger
@@ -225,68 +222,6 @@ class Packet:
         packet = cls(pkt_type, payload, flags & ~PKT_FLAG_HMAC, version=version)
         packet._crc = crc
         return packet
-
-    # -- v4 遗留 JSON / 屏幕包辅助（TODO(phase-4/5): 调用点切换后删除） -------
-
-    @classmethod
-    def create_json(cls, pkt_type: int, data: dict[str, Any], compress: bool = True) -> Packet:
-        """创建 JSON 载荷包（v4 遗留面，仅存量调用方使用）。"""
-        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        flags = PKT_FLAG_COMPRESSED if compress else PKT_FLAG_NONE
-        return cls(pkt_type, payload, flags)
-
-    def to_json(self) -> dict[str, Any]:
-        """解析 JSON 载荷（v4 遗留面）。"""
-        result: dict[str, Any] = json.loads(self.payload.decode("utf-8"))
-        return result
-
-    @classmethod
-    def create_screen(
-        cls,
-        img_data: bytes,
-        width: int,
-        height: int,
-        quality: int,
-        is_diff: bool = False,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        compress: bool = True,
-    ) -> Packet:
-        """创建屏幕数据包（v4 遗留面：``[4B meta_len][meta JSON][图像字节]``）。
-
-        帧校验字段由 v4 的 MD5 前 8 位改为 **SHA-256 前 8 位**（v5 无 v4 客户端，
-        无需字节级一致；顺带清除 bandit B324）。
-        """
-        meta = {
-            "width": width,
-            "height": height,
-            "quality": quality,
-            "is_diff": is_diff,
-            "offset_x": offset_x,
-            "offset_y": offset_y,
-            "timestamp": time.time(),
-            "checksum": sha256(img_data, usedforsecurity=False).hexdigest()[:8],
-        }
-        meta_bytes = json.dumps(meta).encode("utf-8")
-        payload = struct.pack(">I", len(meta_bytes)) + meta_bytes + img_data
-        # 图像字节已 JPEG/H.264 压缩：compress=True 时置 PRE_COMPRESSED 跳过 zlib（热点修复）。
-        flags = PKT_FLAG_PRE_COMPRESSED if compress else PKT_FLAG_NONE
-        return cls(0x01, payload, flags)
-
-    def parse_screen(self) -> tuple[dict[str, Any], bytes]:
-        """解析屏幕数据包（v4 遗留面）。
-
-        Raises:
-            ValueError: 包类型不是屏幕帧。
-        """
-        if self.type != 0x01:
-            raise ValueError("Not a screen packet")
-        meta_len = struct.unpack(">I", self.payload[:4])[0]
-        if meta_len > len(self.payload) - 4:
-            raise ValueError("屏幕包 meta 长度越界")
-        meta: dict[str, Any] = json.loads(self.payload[4 : 4 + meta_len].decode("utf-8"))
-        img_data = self.payload[4 + meta_len :]
-        return meta, img_data
 
     def get_crc(self) -> int:
         """返回上次序列化/解析时记录的 CRC32。"""

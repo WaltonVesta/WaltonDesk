@@ -23,9 +23,9 @@ v4 实现的问题与本模块的对应决策：
 ② 双缓冲交替 + 差分 ``adopt=True``（见上）。
 ③ 失败一律 ``raise ScreenCaptureError(...) from exc``，禁止兜底返回值。
 
-文件末尾的 :class:`ScreenCapturer` 是**v4 兼容外壳**（``server/service.py`` 仍在
-import），保持 v4 全部行为语义（含 PIL 输出与 ``get_screen_size`` 兜底），
-阶段 9 随 v4 运行时一并删除。v5 新代码一律使用 :class:`MssScreenSource`。
+文件末尾的 v4 兼容外壳 ``ScreenCapturer`` 已随阶段 9 批 4 遗留面清理删除
+（其消费方 v4 ``service.py`` 已于批 3 拆除）。v5 一律使用
+:class:`MssScreenSource`。
 """
 
 from __future__ import annotations
@@ -37,12 +37,10 @@ from typing import Any
 import mss
 import numpy as np
 import numpy.typing as npt
-from PIL import Image
 
 from rdc.capture.monitor import (
     VIRTUAL_SCREEN_INDEX,
     MonitorInfo,
-    MonitorNotFoundError,
     MonitorSelector,
 )
 from rdc.capture.source import BGRA_CHANNELS, CaptureFrame, FrameStats, bgra_view
@@ -51,13 +49,9 @@ from rdc.logging import get_logger
 
 __all__ = [
     "MssScreenSource",
-    "ScreenCapturer",
 ]
 
 _LOG = get_logger("capture.mss_source")
-
-#: v4 兼容外壳专用的历史兜底尺寸。v5 新代码禁止引用（硬性约束 3）。
-_V4_FALLBACK_SIZE = (1920, 1080)
 
 
 class MssScreenSource:
@@ -328,66 +322,3 @@ class MssScreenSource:
         """记录一次失败采集（计数 + 最近耗时）。"""
         self._failed += 1
         self._last_ms = elapsed_ms
-
-
-class ScreenCapturer:
-    """v4 兼容外壳（``server/service.py`` v4 广播循环专用，阶段 9 删除）。
-
-    内部委托 :class:`MssScreenSource`，但**原样保留 v4 行为语义**：
-
-    - :meth:`capture` 返回 PIL RGB 图像（v4 调用方按 PIL 处理）；
-    - :meth:`get_screen_size` 失败时返回 ``(1920, 1080)`` 兜底——这是 v4 的历史
-      行为，为了让 service.py 鼠标坐标钳制不炸而保留；v5 新代码一律走
-      :attr:`MssScreenSource.frame_size`（失败必抛，硬性约束 3）；
-    - 默认采集**第一块物理屏**（``monitor=1``，v4 语义），而非 v5 的虚拟全屏。
-
-    Args:
-        monitor: 显示器编号（1 起），非法值按 v4 语义钳到 1。
-    """
-
-    def __init__(self, monitor: int = 1) -> None:
-        self.monitor = monitor if monitor >= 1 else 1
-        self._source = MssScreenSource(monitor_index=self.monitor)
-
-    def capture(self) -> Image.Image:
-        """采集并转成 PIL RGB 图像（与 v4 返回值语义一致）。
-
-        Raises:
-            ScreenCaptureError: 采集失败（v4 同语义：包装后抛出，不静默）。
-        """
-        frame = self._source.capture()
-        bgra = frame.data
-        height, width = bgra.shape[:2]
-        rgb = bgra[:, :, :3][:, :, ::-1]  # BGRA -> RGB（通道序坑见 STAGE5 §2.6 坑 2）
-        return Image.frombytes("RGB", (width, height), rgb.tobytes())
-
-    def get_screen_size(self) -> tuple[int, int]:
-        """屏幕尺寸，失败返回 v4 历史兜底 ``(1920, 1080)``（仅本兼容壳保留）。"""
-        try:
-            return self._source.frame_size
-        except ScreenCaptureError as exc:
-            _LOG.error("获取屏幕尺寸失败（v4 兼容壳返回兜底值）", error=str(exc))
-            return _V4_FALLBACK_SIZE
-
-    def get_monitors(self) -> list[dict[str, int]]:
-        """显示器列表（v4 的 dict 格式，跳过虚拟显示器）。"""
-        return [
-            {"left": m.left, "top": m.top, "width": m.width, "height": m.height}
-            for m in self._source.monitors()
-        ]
-
-    def set_monitor(self, monitor: int) -> None:
-        """切换显示器（v4 语义：非法索引静默忽略、**绝不抛错**——v4 调用方
-        在广播循环里裸调本方法，异常会炸掉整条推流线程）。"""
-        if monitor >= 1:
-            try:
-                self._source.set_monitor(monitor)
-            except MonitorNotFoundError as exc:
-                _LOG.warning("显示器索引不存在，保持当前屏（v4 兼容语义）", monitor=monitor, error=str(exc))
-                return
-            self.monitor = monitor
-            _LOG.info("切换到显示器", monitor=monitor)
-
-    def close(self) -> None:
-        """释放资源（幂等）。"""
-        self._source.close()
