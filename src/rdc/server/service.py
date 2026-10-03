@@ -65,7 +65,13 @@ from rdc.protocol.messages import (
     StreamControl,
 )
 from rdc.security.audit_events import EVENTS
-from rdc.security.certs import ExpiryStatus, UserCertBundle, check_expiry, load_user_cert_bundle
+from rdc.security.certs import (
+    ExpiryStatus,
+    UserCertBundle,
+    check_expiry,
+    load_user_cert_bundle,
+    require_within_data_root,
+)
 from rdc.server.audit import AuditLogger
 from rdc.server.auth import REASON_BAD_PASSWORD, HostAuth
 from rdc.server.broadcaster import SubscriptionRegistry
@@ -305,7 +311,12 @@ class HostService:
         ensure_dirs()
         s = self._settings
         if s.tls_cert_path and s.tls_key_path:
-            bundle = load_user_cert_bundle(Path(s.tls_cert_path), Path(s.tls_key_path))
+            # 路径穿越防护（渗透清单 S4）：config.json 里的证书路径必须先
+            # 规范化并限定在应用数据根内——否则恶意/误配路径会把数据根外
+            # 的任意文件（他人私钥、系统文件）读入内存尝试解析。
+            cert_p = require_within_data_root(Path(s.tls_cert_path), label="证书")
+            key_p = require_within_data_root(Path(s.tls_key_path), label="私钥")
+            bundle = load_user_cert_bundle(cert_p, key_p)
             self._cert_bundle = bundle
             status = check_expiry(bundle.not_before, bundle.not_after)
             if status is not ExpiryStatus.VALID:

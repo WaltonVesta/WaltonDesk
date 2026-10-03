@@ -46,6 +46,7 @@ __all__ = [
     "check_expiry",
     "describe_cert",
     "load_user_cert_bundle",
+    "require_within_data_root",
     "rotation_advice",
 ]
 
@@ -158,11 +159,47 @@ def _dns_names(cert: x509.Certificate) -> tuple[str, ...]:
     return tuple(san.get_values_for_type(x509.DNSName))
 
 
+def require_within_data_root(path: Path, *, label: str) -> Path:
+    """路径穿越防护：证书等敏感文件必须位于应用数据根目录**之内**。
+
+    ``Settings.tls_cert_path`` / ``tls_key_path`` 来自 ``config.json``——配置由
+    本机用户书写，但一旦被诱导写入恶意路径（``../../`` 指向 HOME 之外的敏感
+    私钥/系统文件），:func:`load_user_cert_bundle` 会把该文件读入内存并尝试
+    解析。读取副作用必须限制在数据根内。
+
+    判定（任一条不满足抛 :class:`TlsError`）：
+
+    1. ``resolve()``（规范化 ``..`` 并展开符号链接）后的路径，必须以
+       :func:`~rdc.config.paths.config_dir` 的 ``resolve()`` 路径为前缀；
+    2. 指向数据根之外的符号链接：``resolve()`` 已把链接展开为真实目标，
+       逃逸链接在第 1 步即被拒。
+
+    比较用 ``os.path`` 分隔符感知逻辑，避免 ``C:\\data`` 误配 ``C:\\database``。
+    """
+    import os
+
+    from rdc.config.paths import config_dir
+
+    root = config_dir().resolve()
+    resolved = path.resolve()
+    try:
+        rel = os.path.relpath(str(resolved), str(root))
+    except ValueError as exc:  # 跨盘符（Windows）：无法构成相对路径 = 越界
+        raise TlsError(f"{label} 路径越出应用数据根，拒绝加载: {path}") from exc
+    if rel == os.pardir or rel.startswith(f"..{os.sep}") or os.path.isabs(rel):
+        raise TlsError(f"{label} 路径穿越应用数据根（{rel}），拒绝加载: {path}")
+    return resolved
+
+
 def load_user_cert_bundle(cert_path: Path, key_path: Path) -> UserCertBundle:
     """加载并校验用户证书 + 私钥，返回元数据 bundle。
 
     校验链：PEM 可解析 → 私钥可读且与证书公钥匹配 → 未过期。
     任一失败抛 :class:`TlsError`（**不回落自签名**）。
+
+    ⚠️ 路径来自 ``config.json`` 的调用点（:meth:`HostService._prepare_certificates`）
+    须先过 :func:`require_within_data_root` 再调用本函数——本函数是纯解析件，
+    测试直接注入任意 tmp 路径，不承担数据根边界校验。
 
     Args:
         cert_path: 证书 PEM 路径（全链文件按 cryptography 语义取首段叶证书）。
