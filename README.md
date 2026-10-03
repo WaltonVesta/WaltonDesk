@@ -14,7 +14,7 @@
 
 ## 版本状态
 
-当前处于 **v4.0.3 → v5.0.0 重构阶段 4**（传输层）。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)。
+当前处于 **v4.0.3 → v5.0.0 重构阶段 9 ✅ 完成（安全加固 + 装配）**，下一步 **阶段 10（打包发布）**。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)，阶段 9 交付见 [`STAGE9_REPORT.md`](STAGE9_REPORT.md)。
 
 ## 协议兼容性
 

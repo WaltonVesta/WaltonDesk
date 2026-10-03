@@ -1,8 +1,8 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-09-26（阶段 7 ✅ 完成）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md`（阶段报告）
-> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）
+> 最后更新：2026-10-03（阶段 9 ✅ 完成收口）
+> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md` / `STAGE9_REPORT.md`（阶段报告；阶段 8 延后未开）
+> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）→ 阶段 9（`efd38a0` 任务书基线 → `188479d` 批0 → `44c3b2b` 批1 → `59b807c` 批2 → `f8ea292` 批3 → `f2ca14e`+`e7b6d9c` 批4 → `ab95509`/`12f6b7a`/`d07a79a`/`bfea86a`/`dde0b8a` 批5 → 收口）
 
 ---
 
@@ -319,6 +319,11 @@ input/ 覆盖率: TOTAL 95.5%（验收线 ≥70%）
 
 ## 下一步：阶段 8 — 文件传输 + 音频（可选，20-26h）
 
+> 📌 2026-10-02 用户决定：**阶段 8 延后**，先执行阶段 9（安全加固 + 装配）；
+> 阶段 9 已于 2026-10-03 收口完成，当前下一步 = **阶段 10（打包发布）**，见文末。
+> 本章节内容仍有效（其第 3 项"路径穿越防护"的阶段 9 前置部分已落地并复跑实测，
+> 文件传输面留待阶段 8 补测——STAGE9_REPORT §4 S4 / 遗留 (b)）。
+
 1. `file_transfer.py`：1MB 分块 + SHA-256 + 断点续传（协议 `ClipboardEvent`
    分帧已就绪，剪贴板图片/文件字节的出站通道即接此处）；
 2. `transfer_dialog.py`：拖拽 UI + 进度 + 暂停/续传（复用 D26 非模态+Future 模式）；
@@ -331,7 +336,7 @@ input/ 覆盖率: TOTAL 95.5%（验收线 ≥70%）
 
 ---
 
-# 阶段 9：安全加固 + 装配（进行中，2026-10-02 起）
+# 阶段 9：安全加固 + 装配 — ✅ 完成（详见 STAGE9_REPORT.md，2026-10-03 收口）
 
 任务书基线：`efd38a0`，1137 passed。执行方案：批 0→5 + 收口，每批 commit（用户已确认全案与 2 疑点方案）。
 
@@ -344,36 +349,54 @@ input/ 覆盖率: TOTAL 95.5%（验收线 ≥70%）
 | 批 2 | B7 certs（用户证书加载/轮换/过期检测接 tls.py）+ B8 audit（认证/连接/控制三类事件） | `59b807c` | ✅ |
 | 批 3 | A2 service.py → {service,auth,banlist,broadcaster,audit} 五件；v4 线程模型删除，转 asyncio TransportServer + qasync；CLI serve 落地 | `f8ea292` | ✅ |
 | 批 4 | A1 client/controller.py 状态机 + A3 default_backend + A4 coalesce 挂帧节拍 + CLI control/GUI 装配 + Task 5 遗留面清理（_v4_config/constants/logger shim/ScreenCapturer/Packet v4 辅助） | `f2ca14e` + `e7b6d9c` | ✅ |
-| 批 5 | 同机双进程 loopback 端到端 + 渗透四项实测 + bandit/pip-audit 复跑 + 全量覆盖率收口 + 真机走查清单 | — | ⏳ 未开始 |
-| 收口 | STAGE9_REPORT.md + PROGRESS/README 修正 | — | ⏳ 未开始 |
+| 批 5 | 同机双进程 loopback 端到端 + 渗透四项实测 + bandit/pip-audit 复跑 + 全量覆盖率收口 + 真机走查清单交付 + 用户批准的 nosec 补齐（收口前增项） | `ab95509`（e2e）/ `12f6b7a`（渗透+证书穿越防护）/ `d07a79a`（覆盖率补测）/ `bfea86a`（走查清单）/ `dde0b8a`（nosec 补齐） | ✅ |
+| 收口 | STAGE9_REPORT.md + PROGRESS/README 修正 | 本次提交 | ✅ |
 
-## 批 4 验收数据（当前 HEAD `e7b6d9c`）
+## 批 4 验收数据（`e7b6d9c` 时点，已被批 5 超越）
 
 - **pytest：1382 passed，退出码 0**（全量套件）；ruff 0 错、mypy 98 files 无问题。
 - 覆盖率：`client/controller.py` 90.0%；input 核心 base/coalesce/keys 100%、windows 88.3%；`client/ratelimit.py` 100%。
 - controller **零 Qt/Widgets 导入**红线核验通过。
 - 遗留面清理：`git grep` 核验零消费者后删除；`test_framing.py`/`test_config_migration.py` 的 v4 基线能力（CRC 篡改、粘包、半帧）已迁至 `test_protocol_framing_v5.py`。
 
-## 批 4 关键修复（重要，批 5 若见"测试全绿但 exit 1"类问题参照此法）
+## 批 4 关键修复（"测试全绿但 exit 1"类问题排查法，批 5 全程未复现、备后续参照）
 
 1. **退出码 1 污染**：pytest 全绿但进程 exit 1，且 `test_protocol_codec` 两个 hypothesis 用例间歇失败。根因：①controller 在解释器/GC 拆环阶段的收尾回调中 `ensure_future` 起重连环 → 协程 never-awaited 告警被 `filterwarnings=["error"]` 计入失败；②某测试用例直接构造 controller 未登记 `_LIVE_CTLS`，4 个后台任务存活到退出期。修复：`_start_reconnect_loop` 加"无运行循环则直接落定 disconnected"守卫 + 用例补登记；补守卫测试 `test_reconnect_guard_when_no_running_loop`。
 2. 排查手法备查：`gc.set_debug(DEBUG_UNCOLLECTABLE)` 定位垃圾对象；按测试类累加前缀二分泄漏源（脚本模式见 git 史，临时文件已清理）。
 
-## 批 5 待办（含已确认的验收口径）
+## 批 5 验收数据（收口终态，真实输出）
 
-- [ ] loopback 双进程自动验证：认证通过 + 收到 H.264 帧 + 输入事件被受理（真机手感走查由用户执行，需交付清单）。
-- [ ] 渗透四项：重放（复用阶段 4 三层测试）/ MITM / 弱口令爆破 / 路径穿越（banlist.json、审计日志、证书、配置写入点；报告声明"文件传输面待阶段 8 补测"）。
-- [ ] bandit 0 high + pip-audit 0 vuln 复跑。
-- [ ] 全量覆盖率收口（总体 ≥70%、核心 ≥85%）。
-- [ ] 真机走查清单（STAGE7 §6 口径：鼠标落点、中文 IME、剪贴板等）。
-- [ ] commit message：`test(e2e): add loopback e2e and penetration checks`。
+```
+ruff:   All checks passed!（全仓）
+mypy:   Success: no issues found in 98 source files
+pytest: 1417 passed, 2 skipped，退出码 0
+        （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
+bandit: High 0 / Medium 0 / Low 0（46 处误报全部 nosec + 逐处理由注释，口径见报告 §5）
+pip-audit: No known vulnerabilities found（rdc 自身不在 PyPI 被 Skip，属预期）
+覆盖率: 总体 89.7%（线 ≥70%）；核心清单全部 ≥85%——批 5 补齐两处缺口：
+        transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
+        （新增 test_transport_screen_channel_tls.py / test_transport_server_error_paths.py）
+loopback 判据: 认证通过 + H.264 帧（真实编码+真实解码 64×64×3 rgb24）+ 输入受理，三项 ✅
+真机走查: 清单已交付（STAGE9_CHECKLIST.md，8 组 45 项），**结果待用户回报**（1-2 天）
+```
 
-## 收口待办
+## 批 5 偏差与发现（如实记录，详见 STAGE9_REPORT §1/§4/§5）
 
-- STAGE9_REPORT.md（6 批完成情况、装配架构、安全加固、渗透清单、bandit/pip-audit、端到端+走查清单、阶段 10 起点）。
-- README 状态修正（现仍写"阶段 4"）。
-- commit message：`docs(stage9): add stage 9 report and update PROGRESS`。
+- **nosec 未随批落地**：批 1-4 计划的抑制补齐当时未做（收口前全树仅 1 条 nosec），
+  bandit Medium/Low 未清零；经用户决定收口前统一补齐（`dde0b8a`），复扫归零。
+  纪律固化：新写 assert 当场带 `# nosec` + 理由。
+- **B101 +9 系新代码引入**（批 3 service 重写 +6、批 4 controller +3），非遗留面残留。
+- **渗透 S1 发现**：同会话内原样重投已签名帧会被再次受理（帧 HMAC 覆盖头部+载荷但**无序号**）；
+  当前业务面后果为幂等噪声级 → 遗留 (a)。
+- **渗透 S4**：证书路径穿越防护 `require_within_data_root` 落地并实测（`12f6b7a` 含）；
+  文件传输面 skip 声明 → 遗留 (b)。符号链接逃逸用例本机非管理员 skip（判定逻辑其余用例已覆盖）。
 
-## 阶段 10 起点（预告）
+## 阶段 10 起点（下一步：打包发布）
 
-阶段 8（文件传输 + 音频，用户已决定延后）+ 路径穿越的文件传输面补测 + 性能压测（B3 修复后的多客户端 broadcaster 实测）。
+进场携带（详见 STAGE9_REPORT §8/§9）：
+- **真机走查 45 项结果待用户回报**；发现 ❌ 项单独提交 bug fix + 更新 STAGE9_REPORT，不混入本收口。
+- **遗留 (a)**：帧 HMAC 无序号——阶段 8/10 引入有状态操作（文件传输/指令序列）前须补帧序号/滑动窗口重放防护。
+- **遗留 (b)**：文件传输面渗透待阶段 8 补测（目标目录沙箱根校验 + 穿越/符号链接/名规范化实测，属阶段 8 验收项）。
+- 阶段 10 本体：本机 PyInstaller -D + 冷启动 <2s 验收、Nuitka CI、更新通道本地模拟、macOS/Linux CI 补验（R6）、性能压测（B3 修复后多客户端 broadcaster 实测）、硬编选项标定、qasync 3.16 切换预案。
+
+> STAGE9_INPROGRESS.md 为批 0-4 中断保护快照（保留备查，其"批 5 待办"已全部落地于本节与 STAGE9_REPORT）。
