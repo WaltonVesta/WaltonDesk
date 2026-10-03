@@ -328,3 +328,52 @@ input/ 覆盖率: TOTAL 95.5%（验收线 ≥70%）
 5. 阶段 7 遗留归阶段 9 装配：controller 实现 `send_mouse/send_key/send_text`、
    剪贴板三类双向接线、coalesce 挂 pipeline 节拍（`sync_to_frame`）、
    `default_backend` 构造与 `reset` 挂断连路径、Windows 真机走查（STAGE7 §6）。
+
+---
+
+# 阶段 9：安全加固 + 装配（进行中，2026-10-02 起）
+
+任务书基线：`efd38a0`，1137 passed。执行方案：批 0→5 + 收口，每批 commit（用户已确认全案与 2 疑点方案）。
+
+## 批次状态
+
+| 批 | 内容 | commit | 状态 |
+|---|---|---|---|
+| 批 0 | bandit + pip-audit 入 dev 组，首轮基线扫描 | `188479d` | ✅ |
+| 批 1 | B5 password_policy + B6 banlist（限流迁移/持久化/1000 裁剪）+ B9 MD5 确认 | `44c3b2b` | ✅ |
+| 批 2 | B7 certs（用户证书加载/轮换/过期检测接 tls.py）+ B8 audit（认证/连接/控制三类事件） | `59b807c` | ✅ |
+| 批 3 | A2 service.py → {service,auth,banlist,broadcaster,audit} 五件；v4 线程模型删除，转 asyncio TransportServer + qasync；CLI serve 落地 | `f8ea292` | ✅ |
+| 批 4 | A1 client/controller.py 状态机 + A3 default_backend + A4 coalesce 挂帧节拍 + CLI control/GUI 装配 + Task 5 遗留面清理（_v4_config/constants/logger shim/ScreenCapturer/Packet v4 辅助） | `f2ca14e` + `e7b6d9c` | ✅ |
+| 批 5 | 同机双进程 loopback 端到端 + 渗透四项实测 + bandit/pip-audit 复跑 + 全量覆盖率收口 + 真机走查清单 | — | ⏳ 未开始 |
+| 收口 | STAGE9_REPORT.md + PROGRESS/README 修正 | — | ⏳ 未开始 |
+
+## 批 4 验收数据（当前 HEAD `e7b6d9c`）
+
+- **pytest：1382 passed，退出码 0**（全量套件）；ruff 0 错、mypy 98 files 无问题。
+- 覆盖率：`client/controller.py` 90.0%；input 核心 base/coalesce/keys 100%、windows 88.3%；`client/ratelimit.py` 100%。
+- controller **零 Qt/Widgets 导入**红线核验通过。
+- 遗留面清理：`git grep` 核验零消费者后删除；`test_framing.py`/`test_config_migration.py` 的 v4 基线能力（CRC 篡改、粘包、半帧）已迁至 `test_protocol_framing_v5.py`。
+
+## 批 4 关键修复（重要，批 5 若见"测试全绿但 exit 1"类问题参照此法）
+
+1. **退出码 1 污染**：pytest 全绿但进程 exit 1，且 `test_protocol_codec` 两个 hypothesis 用例间歇失败。根因：①controller 在解释器/GC 拆环阶段的收尾回调中 `ensure_future` 起重连环 → 协程 never-awaited 告警被 `filterwarnings=["error"]` 计入失败；②某测试用例直接构造 controller 未登记 `_LIVE_CTLS`，4 个后台任务存活到退出期。修复：`_start_reconnect_loop` 加"无运行循环则直接落定 disconnected"守卫 + 用例补登记；补守卫测试 `test_reconnect_guard_when_no_running_loop`。
+2. 排查手法备查：`gc.set_debug(DEBUG_UNCOLLECTABLE)` 定位垃圾对象；按测试类累加前缀二分泄漏源（脚本模式见 git 史，临时文件已清理）。
+
+## 批 5 待办（含已确认的验收口径）
+
+- [ ] loopback 双进程自动验证：认证通过 + 收到 H.264 帧 + 输入事件被受理（真机手感走查由用户执行，需交付清单）。
+- [ ] 渗透四项：重放（复用阶段 4 三层测试）/ MITM / 弱口令爆破 / 路径穿越（banlist.json、审计日志、证书、配置写入点；报告声明"文件传输面待阶段 8 补测"）。
+- [ ] bandit 0 high + pip-audit 0 vuln 复跑。
+- [ ] 全量覆盖率收口（总体 ≥70%、核心 ≥85%）。
+- [ ] 真机走查清单（STAGE7 §6 口径：鼠标落点、中文 IME、剪贴板等）。
+- [ ] commit message：`test(e2e): add loopback e2e and penetration checks`。
+
+## 收口待办
+
+- STAGE9_REPORT.md（6 批完成情况、装配架构、安全加固、渗透清单、bandit/pip-audit、端到端+走查清单、阶段 10 起点）。
+- README 状态修正（现仍写"阶段 4"）。
+- commit message：`docs(stage9): add stage 9 report and update PROGRESS`。
+
+## 阶段 10 起点（预告）
+
+阶段 8（文件传输 + 音频，用户已决定延后）+ 路径穿越的文件传输面补测 + 性能压测（B3 修复后的多客户端 broadcaster 实测）。
