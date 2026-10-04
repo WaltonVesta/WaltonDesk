@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 · 任务书基线 `efd38a0`（1137 passed）→ 收口 HEAD 本提交（1417 passed / 2 skipped）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug（详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1419 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -132,9 +132,21 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 | ② 收到 H.264 帧 | pipeline 真实编码器（hw_probe 选型，本机 libx264）→ 主控端 ≥2 帧、`frame_arrived` 像素 64×64×3 **真实解码**（PyAV rgb24）、被控端 `published>0`、订阅登记=1 |
 | ③ 输入被受理 | `send_mouse/send_key/send_text + flush_now` → 被控端替身后端记录 `move(33,44)`、`click×2`、`press(enter)`、`text(hi)` |
 
-### 真机手感走查：**清单已交付，结果待用户回报**
+### 真机手感走查：**清单已交付，结果持续回报中**
 
-用户执行 45 项走查（`STAGE9_CHECKLIST.md`，STAGE7 §6 口径：鼠标落点/跨屏负原点/中文 IME/剪贴板/卡键兜底/断线重连/托盘/安全体验抽查等）需 1-2 天，本报告收口时尚无结果。**走查发现 ❌ 项将单独提交 bug fix 并更新本报告，不混入收口。**
+用户执行 45 项走查（`STAGE9_CHECKLIST.md`，STAGE7 §6 口径：鼠标落点/跨屏负原点/中文 IME/剪贴板/卡键兜底/断线重连/托盘/安全体验抽查等）。按约定，走查发现的 ❌ 项单独提交 bug fix 并更新本报告，不混入收口。
+
+**已发现并修复 1 项（2026-10-04，批 4 引入）**：
+
+| 项 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1.1 启动 GUI | `rdc` / `rdc --gui` 窗口不出现；asyncio debug 模式抛 `RuntimeError: loop <QIOCPEventLoop running=False ...> is not the running loop`（source_traceback 指 `ui/session.py:151` create_task） | `run_gui` 与 `cli._run_gui_with`（批 4 同批引入，共 2 处同病灶）用**裸 `app.exec()`** 驱动 qasync——跳过 asyncio running-loop 登记。Python 3.14 的 Task 步进 `_check_allowed` 随即抛错，主编排协程（launcher 对话框）第一步即死 → 窗口永不出现。报错时机在 task 首次被 `_SimpleTimer` 回调调度时，**非 create_task 创建时**（故"挪到 QTimer.singleShot(0) 里创建"不解决问题，根因是驱动方式） | 改 `loop.run_forever()`（qasync 内部先 `asyncio.events._set_running_loop(self)` 再进 `app.exec()`，见 `qasync/__init__.py` run_forever）；口径与 PoC `mode_live` 一致。`_run_gui_with` 同时补 `asyncio.set_event_loop(loop)`（原缺失） |
+
+**测试缺口根因**（用户分析确认）：批 4 的 `test_ui_session.py` 只测 `qimage_factory`/`build_client_controller` 纯函数，其 docstring 自注"launcher 主编排端到端由批 5 真机走查覆盖"——即 `run_gui` 的**循环驱动路径从未被自动化覆盖**；既有 GUI 测试均直接构造 widget 不经 `run_gui`。批 5 的 loopback 端到端走 `HostService`/`ClientController` 编程装配面，同样不经 GUI 入口，故双进程测试全绿也漏掉了这个病灶。
+
+**哨兵测试补齐**（`tests/integration/test_gui_startup_smoke.py`，2 项）：offscreen 下走 `cli.main(["--gui"])` 与 `cli.main(["serve","--tray"])` 完整路径，打桩交互点（`launch_choice`/`host_session`）后断言**协程真被调度**。已验证：病灶代码上双红（复现同款 RuntimeError + `calls==[]`），修复后双绿（<1s，5 秒 QTimer 看门狗防挂死兜底）。
+
+**走查其余项**：GUI 启动修复后，1.2-1.8 / 2.x / 3.x / 4.x / 5.x / 6.x 走查方可继续（此前阻塞在 1.1），结果待用户回报；再发现 ❌ 项按同一方式处理。
 
 ## 7. 验收数据收口
 
@@ -145,6 +157,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
+（收口后走查修复终态：pytest 1419 passed / 2 skipped，+2 为 GUI 启动哨兵；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
@@ -164,7 +177,7 @@ pip-audit: 0 vulnerabilities
 
 | # | 项 | 归属 |
 |---|---|---|
-| 1 | 真机走查 45 项结果待用户回报；❌ 项单独 bug fix + 更新本报告 | 收口后立即 |
+| 1 | 真机走查 45 项：**第一轮已回报**——1.1 GUI 启动 bug 已修复（§6，哨兵测试 2 项入仓）；1.2 起其余项走查结果待继续回报 | 走查进行中 |
 | 2 | 符号链接逃逸实测用例在本机 skip（非管理员无 symlink 权限），CI/开发者模式环境自动生效 | 阶段 10 CI |
 | 3 | 硬编选项映射为空（`_hardware_options` 不发明参数），硬件编码器真正启用需逐卡标定 | 阶段 10 |
 | 4 | qasync 官方声明 <3.14；本机 3.14.3 四判据实测通过，3.16 时切换 PoC 保留方案乙 | 阶段 10 / 环境升级 |

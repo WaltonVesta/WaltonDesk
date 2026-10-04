@@ -11,7 +11,8 @@
   :class:`rdc.server.service.HostService` + :class:`TrayController`
   （暂停/恢复/重启/退出），CLIENT → :class:`MainWindow` +
   :class:`ClientController`（关窗即退出）。qasync 的 QEventLoop 由
-  ``app.exec()`` 驱动，协程与 Qt 同线程——事件回调零投递。
+  ``loop.run_forever()`` 驱动（内部先进 app.exec 并登记 asyncio
+  running-loop），协程与 Qt 同线程——事件回调零投递。
 
 v4 对照：``main.py:show_gui()``（Tkinter 启动菜单 + 双分支）→ launcher 协程化；
 被控端托盘 v4 起在独立线程跑 pystray（未装即静默降级），v5 用
@@ -149,4 +150,8 @@ def run_gui(argv: Sequence[str] | None = None) -> int:
     loop = event_loop(app)
     asyncio.set_event_loop(loop)
     loop.create_task(_gui_main(app))
-    return int(app.exec())
+    # 必须经 run_forever 驱动：qasync 在内部进入 app.exec() 前先登记 asyncio
+    # running-loop（qasync/__init__.py run_forever）；裸 app.exec() 跳过该步，
+    # Python 3.14 Task 步进检查抛 "is not the running loop"，协程体永不执行
+    # （2026-10-04 真机走查 bug；哨兵见 tests/integration/test_gui_startup_smoke.py）
+    return int(loop.run_forever())

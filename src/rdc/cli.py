@@ -126,17 +126,23 @@ def _run_gui_with(
     session: Callable[[Any, Settings], Awaitable[int]], settings: Settings
 ) -> int:
     """在 Qt/qasync 事件循环里跑一个会话协程（``serve --tray`` 与 GUI 入口共用）。"""
+    import asyncio
+
     from rdc.ui.app import create_app, event_loop
 
     app = create_app([])
     loop = event_loop(app)
+    asyncio.set_event_loop(loop)
 
     async def _amain() -> None:
         await session(app, settings)
         app.quit()
 
     loop.create_task(_amain())
-    return int(app.exec())
+    # run_forever 而非裸 app.exec()：qasync 需先登记 asyncio running-loop，
+    # 否则协程第一步即抛 "is not the running loop"（同 ui/session.run_gui，
+    # 2026-10-04 走查 bug；哨兵见 tests/integration/test_gui_startup_smoke.py）
+    return int(loop.run_forever())
 
 
 def _print_host_banner(service: object, settings: Settings) -> None:
