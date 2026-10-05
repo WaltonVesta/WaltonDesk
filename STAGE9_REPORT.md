@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug（详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1419 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug（两轮详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1420 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -146,7 +146,15 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **哨兵测试补齐**（`tests/integration/test_gui_startup_smoke.py`，2 项）：offscreen 下走 `cli.main(["--gui"])` 与 `cli.main(["serve","--tray"])` 完整路径，打桩交互点（`launch_choice`/`host_session`）后断言**协程真被调度**。已验证：病灶代码上双红（复现同款 RuntimeError + `calls==[]`），修复后双绿（<1s，5 秒 QTimer 看门狗防挂死兜底）。
 
-**走查其余项**：GUI 启动修复后，1.2-1.8 / 2.x / 3.x / 4.x / 5.x / 6.x 走查方可继续（此前阻塞在 1.1），结果待用户回报；再发现 ❌ 项按同一方式处理。
+**已发现并修复第 2 项（2026-10-05，批 4 引入）**：
+
+| 项 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| launcher→主窗切换 | `rdc --gui` launcher 窗口正常出现，点"启动主控端"**瞬间进程崩溃**，traceback 三段：`RuntimeError: libshiboken: Internal C++ object (_SimpleTimer) already deleted` + `Task was destroyed but it is pending! (Task-1, _gui_main)` + `RuntimeError: no running event loop` | 三段互证的根因链：① launcher QDialog 是当时**唯一可见窗口**，accept 关闭 → Qt `quitOnLastWindowClosed` → `app.quit()` → `run_forever` 提前返回，`_gui_main` 正 await `client_session`（`session.py:138`）半路夭折；② 解释器/shiboken 拆除期删 `_SimpleTimer` C++ 对象 → 主窗 `destroyed → stop.set → call_soon` 撞已删 timer（第一炸，唤醒回调丢失）；③ GC 注入 GeneratorExit 拆协程 → finally `await disconnect` → `_teardown` 的 `current_task()` 抛 "no running event loop"（第三炸）。病灶①是第一桶；另注：普通 `QMainWindow.close` 只隐藏不销毁，`destroyed` 唤醒源本就不可靠 | 修复分三点：**(A 根因)** 装配两处（`run_gui` / `cli._run_gui_with`，`host_session` 路径经由同一 `run_gui`）`app.setQuitOnLastWindowClosed(False)`——退出完全由协程链显式控制（stop Event → `app.quit`），对齐 PoC `mode_live` 显式收尾思路；**(B 唤醒源)** `client_session` 主窗接 `WA_DeleteOnClose`，close 即销毁 → `destroyed → stop` 可靠触发（否则 A 修掉后关窗挂死）；**(C 纵深防御)** `controller._teardown` 开头加无运行环守卫（对齐 `_start_reconnect_loop` 的 `e7b6d9c` 修复法），拆环期直接落定不死炸 |
+
+**哨兵测试补齐·第二轮**（`tests/integration/test_gui_handoff_smoke.py`，1 项）：走 `cli.main(["--gui"])` 完整路径——真 launcher 程序化点击"启动主控端" → 断言主窗真实出现 → 程序化关窗 → 断言 `disconnect` 链走完且结束时**运行环仍在**（`_SpyController` 探针显式锁病灶 3）→ 5 秒看门狗防挂死回归。已验证：病灶代码上双红（复现三段 traceback），修复后双绿。
+
+**走查其余项**：GUI 启动修复后，1.2-1.8 / 2.x / 3.x / 4.x / 5.x / 6.x 走查方可继续（此前阻塞在 1.1，第二轮后阻塞点为 1.2 主控连接路径），结果待用户回报；再发现 ❌ 项按同一方式处理。
 
 ## 7. 验收数据收口
 
@@ -157,7 +165,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1419 passed / 2 skipped，+2 为 GUI 启动哨兵；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
+（收口后走查修复终态：pytest 1420 passed / 2 skipped，+3 为两轮 GUI 哨兵（第一轮 2 + 第二轮 1）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
@@ -177,7 +185,7 @@ pip-audit: 0 vulnerabilities
 
 | # | 项 | 归属 |
 |---|---|---|
-| 1 | 真机走查 45 项：**第一轮已回报**——1.1 GUI 启动 bug 已修复（§6，哨兵测试 2 项入仓）；1.2 起其余项走查结果待继续回报 | 走查进行中 |
+| 1 | 真机走查 45 项：**已回报两轮**——第一轮 1.1 GUI 启动 bug、第二轮 launcher→主窗切换崩溃 bug 均已修复（§6，哨兵测试共 3 项入仓）；1.2 起其余项走查结果待继续回报 | 走查进行中 |
 | 2 | 符号链接逃逸实测用例在本机 skip（非管理员无 symlink 权限），CI/开发者模式环境自动生效 | 阶段 10 CI |
 | 3 | 硬编选项映射为空（`_hardware_options` 不发明参数），硬件编码器真正启用需逐卡标定 | 阶段 10 |
 | 4 | qasync 官方声明 <3.14；本机 3.14.3 四判据实测通过，3.16 时切换 PoC 保留方案乙 | 阶段 10 / 环境升级 |

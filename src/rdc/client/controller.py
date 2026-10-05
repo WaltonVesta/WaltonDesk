@@ -599,7 +599,17 @@ class ClientController:
         ⚠️ 取消集**排除当前任务与重连环任务**：二者可能在调用栈上
         （attempt → _teardown），自我取消 = ``await`` 自身死锁或半拆会话；
         环任务由 :meth:`disconnect` / 循环自然收尾显式管理。
+
+        守卫：无运行中事件循环（GC 拆协程 / 解释器退出期的收尾 await）直接
+        返回——``current_task()``/``await task`` 此时必抛 "no running event
+        loop"，且半拆状态随进程退出无害（同 :meth:`_start_reconnect_loop`
+        口径，2026-10-05 走查第二批）。
         """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._tearing_down = True
+            return
         self._tearing_down = True
         current = asyncio.current_task()
         ring: list[asyncio.Task[Any]] = [

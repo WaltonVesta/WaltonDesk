@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
 from rdc.client.controller import ClientController
@@ -116,10 +117,17 @@ async def host_session(app: Any, settings: Settings | None = None) -> int:
 
 
 async def client_session(app: Any, settings: Settings | None = None) -> int:
-    """主控端 GUI 会话（主窗 + 控制器）：关窗即退出。"""
+    """主控端 GUI 会话（主窗 + 控制器）：关窗即退出。
+
+    唤醒链：``WA_DeleteOnClose``（close 即销毁，否则 QMainWindow 关闭
+    仅隐藏、``destroyed`` 永不触发）→ ``destroyed`` → ``stop`` →
+    finally 在**运行中的环**上拆控制器（2026-10-05 走查第二批；
+    配合装配处 ``quitOnLastWindowClosed=False``，Qt 不再抢先夭折协程链）。
+    """
     controller = build_client_controller(settings)
     stop = asyncio.Event()
     win = MainWindow(controller=controller)
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     win.destroyed.connect(stop.set)
     win.show()
     try:
@@ -147,6 +155,11 @@ def run_gui(argv: Sequence[str] | None = None) -> int:
     """
     ensure_gui_thread("run_gui")
     app = create_app(argv)
+    # 退出由协程链显式控制（会话 stop Event → app.quit）。必须关闭 Qt 的
+    # "最后一个窗口关闭即退出"：launcher 对话框是当时唯一可见窗口，它
+    # accept 关闭的瞬间 Qt 会抢先 quit，主编排协程在 await 会话处夭折
+    # （2026-10-05 走查第二批 bug；哨兵见 tests/integration/test_gui_handoff_smoke.py）
+    app.setQuitOnLastWindowClosed(False)
     loop = event_loop(app)
     asyncio.set_event_loop(loop)
     loop.create_task(_gui_main(app))

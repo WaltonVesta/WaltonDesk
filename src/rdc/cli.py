@@ -131,6 +131,10 @@ def _run_gui_with(
     from rdc.ui.app import create_app, event_loop
 
     app = create_app([])
+    # 退出由会话协程显式控制（stop Event → app.quit）：托盘常驻阶段无任何
+    # 可见窗口，Qt 的"最后窗口关闭即退出"会在启动早期抢先 quit 夭折协程链
+    # （同 ui/session.run_gui，2026-10-05 走查第二批）
+    app.setQuitOnLastWindowClosed(False)
     loop = event_loop(app)
     asyncio.set_event_loop(loop)
 
