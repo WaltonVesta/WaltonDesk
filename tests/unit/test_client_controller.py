@@ -232,8 +232,9 @@ class TestStateMachine:
         await asyncio.sleep(0.3)
         assert ctl.state == "disconnected"
 
-    async def test_connect_auth_failure_stops_loop_fast(self) -> None:
-        # 首连认证失败也进环；环内再认证失败 → 立即终止（不烧完 attempts）
+    async def test_connect_auth_failure_starts_no_reconnect(self) -> None:
+        # 走查第四批缺陷 3：首连认证失败**绝不进重连环**——一次点击恰好一次
+        # 服务端认证尝试（旧版起环后立即复用错误口令再试一次，计数×2 喂封禁）
         FakeControl.connect_error = AuthError("口令错误")
         ctl, _ = make_ctrl(
             Settings(auto_reconnect=True, reconnect_delay=0.01, max_reconnect_attempts=50)
@@ -241,10 +242,50 @@ class TestStateMachine:
         calls_before = len(FakeControl.instances)
         with pytest.raises(AuthError):
             await connect_ok(ctl)
-        await asyncio.sleep(0.15)
         assert ctl.state == "disconnected"
-        # 首连 1 次 + 环内至多 1~2 次，远小于 50
-        assert len(FakeControl.instances) - calls_before <= 4
+        assert ctl._reconnect is None  # noqa: SLF001
+        await asyncio.sleep(0.15)  # 即使错误地起了环也该暴露
+        assert len(FakeControl.instances) - calls_before == 1
+        assert ctl.state == "disconnected"
+
+    async def test_link_dead_auth_abort_no_reconnect_success_log(self) -> None:
+        """会话期判死进环后网络恢复但对端拒绝（AuthError）：环上抛中止，
+        不得记 reconnect_success（旧版 return True 被 run() 当成功，日志
+        自相矛盾——走查第四批证据链第 5/6 行）。"""
+        ctl, _ = make_ctrl(Settings(auto_reconnect=True, reconnect_delay=0.01))
+        await connect_ok(ctl)
+        records: list[str] = []
+
+        class _Collect:
+            def warning(self, event: str, **kw: object) -> None:
+                records.append(f"warning:{event}")
+
+            def info(self, event: str, **kw: object) -> None:
+                records.append(f"info:{event}")
+
+        spy = _Collect()
+        orig_cc = cc._LOG  # noqa: SLF001
+        cc._LOG = spy  # type: ignore[assignment]  # noqa: SLF001
+        try:
+            FakeControl.connect_error = AuthError("封禁拒绝")
+            ctl._on_link_dead("eof")  # noqa: SLF001
+            assert ctl.state == "reconnecting"
+            # ReconnectController 实例自带 logger（transport.reconnect），
+            # 一并替换——reconnect_success 正是它记的（病灶 5/6 行日志源）。
+            # 环实例随本测试的 controller 一起销毁，无需还原。
+            assert ctl._reconnect is not None  # noqa: SLF001
+            ctl._reconnect._log = spy  # noqa: SLF001
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                if ctl.state == "disconnected":
+                    break
+            assert ctl.state == "disconnected"
+        finally:
+            cc._LOG = orig_cc  # type: ignore[assignment]  # noqa: SLF001
+        joined = " ".join(records)
+        assert "reconnect_auth_class_abort" in joined
+        assert "reconnect_success" not in joined
+        assert "reconnect_exhausted_giveup" not in joined
 
     async def test_reconnect_guard_when_no_running_loop(
         self, monkeypatch: pytest.MonkeyPatch

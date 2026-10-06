@@ -47,7 +47,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from rdc.config.settings import Settings, current_settings
 from rdc.exceptions import AuthError, ConnectionError, TlsError
@@ -84,6 +84,12 @@ FingerprintConfirmer = Callable[[str, str], "bool | Awaitable[bool]"]
 #: ``(width, height, rgb_ndarray) -> 帧对象``：GUI 传 QImage 包装闭包，
 #: 无 GUI 场景传 ``lambda w, h, arr: object()`` 冒烟替身。
 ImageFactory = Callable[[int, int, Any], object]
+
+#: 认证类失败异常集（rdc ``ConnectionError``=握手/连接被业务层拒绝，非
+#: builtins 网络错误的 ConnectionRefusedError——后者是 OSError 子类，走网络
+#: 重试路径）。**统一语义：一律不进重连环、不重试**——重试只会用同一份错误
+#: 口令再烧一次服务端失败计数，喂封禁窗口（2026-10-06 走查第四批缺陷 3）。
+_AUTH_CLASS_ERRORS: Final = (AuthError, TlsError, ConnectionError)
 
 
 def _default_image_factory(_width: int, _height: int, _arr: Any) -> object:
@@ -187,9 +193,12 @@ class ClientController:
         口令/指纹经回调向 UI 索取（awaitable 感知直通传输层）。失败分支：
 
         - 用户取消口令 → 视为放弃，状态 ``disconnected``，不重连；
-        - 其余失败（网络/认证/TLS）且 ``auto_reconnect`` → 进入重连环
-          （状态 ``reconnecting``，环内认证失败会重新弹口令框，再失败即
-          终止），异常照抛由 UI 展示；
+        - 认证/TLS 类失败（AuthError/TlsError/ConnectionError）→ **直接落定
+          ``disconnected`` 并上抛，绝不进重连环**（2026-10-06 走查第四批：
+          旧版首连认证失败也起环，环内立即复用错误口令再试一次，一次点击
+          烧两次服务端失败计数、喂封禁窗口——"点 2 次就封"病灶）；
+        - 网络类失败（OSError 等）且 ``auto_reconnect`` → 进入重连环
+          （状态 ``reconnecting``，指数退避；环内认证/TLS 类失败同样终止）；
         - 未开自动重连 → ``disconnected`` + 异常上抛。
         """
         await self._teardown()
@@ -201,6 +210,9 @@ class ClientController:
         self._set_state("connecting")
         try:
             await self._open_session(host, port)
+        except _AUTH_CLASS_ERRORS:
+            await self._final_disconnect()
+            raise
         except BaseException:
             if self._settings.auto_reconnect and not self._user_disconnect:
                 self._start_reconnect_loop()
@@ -538,6 +550,13 @@ class ClientController:
             return
         try:
             ok = await self._reconnect.run()
+        except _AUTH_CLASS_ERRORS as exc:
+            # 环内认证/TLS 类失败（如网络恢复后口令仍错）：终止且不重试。
+            # run() 只吞 OSError/TimeoutError，此类异常在此上抛；_teardown
+            # 已在 attempt 开头执行过，落定只需清口令+置态。
+            _LOG.warning("reconnect_abort", error=str(exc))
+            await self._final_disconnect()
+            return
         finally:
             self._reconnect_task = None
         if not ok and not self._user_disconnect:
@@ -576,17 +595,17 @@ class ClientController:
         """单次重连：拆旧会话 → 重建（口令仍持有则复用、不重复弹框）。
 
         Returns:
-            ``True`` = 终止重连环（成功，或失败后已自行落定——认证类失败
-            重新向 UI 索取一次口令，用户取消/仍失败即终止，绝不烧完
-            attempts 喂对端封禁窗口）；``False`` = 网络类失败，退避续试。
+            ``True`` = 连接成功终止环；``False`` = 网络类失败，退避续试。
+            认证/TLS 类失败**上抛**由 :meth:`_run_reconnect_loop` 捕获落定
+            ——旧版在此 ``return True`` 会被 ReconnectController 记成
+            ``reconnect_success``（走查第四批：日志明明失败却报成功，即此）。
         """
         await self._teardown()
         try:
             await self._open_session(self._host, self._port)
-        except (AuthError, TlsError, ConnectionError) as exc:
+        except _AUTH_CLASS_ERRORS as exc:
             _LOG.warning("reconnect_auth_class_abort", error=str(exc))
-            await self._final_disconnect()
-            return True
+            raise
         except OSError as exc:  # 含 builtins.ConnectionError（拒绝/重置）
             _LOG.warning("reconnect_network_failed", error=repr(exc))
             return False
