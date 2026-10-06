@@ -400,3 +400,28 @@ class TestEncoderFactory:
     def test_stats_snapshot_shape(self) -> None:
         s = PipelineStats()
         assert s.captured == 0 and s.encoder == ""
+
+
+# ---------------------------------------------------------------------------
+# 走查 bug 3：奇数分辨率（mss 窗口模式）经真实默认工厂不再崩，发布对齐尺寸
+# ---------------------------------------------------------------------------
+
+
+class TestOddResolutionEndToEnd:
+    async def test_odd_source_frames_publish_aligned_size(self) -> None:
+        from rdc.capture.source import ArrayScreenSource
+
+        bc = RecordingBroadcaster()
+        frames = make_source_frames(2, h=911, w=955)
+        pipe = ScreenPipeline(
+            ArrayScreenSource(frames),
+            broadcaster=bc,  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+        )
+        decision = await pipe.run_once()
+        assert decision is not None and decision.should_capture
+        msg = bc.frames[0]
+        # 病灶：奇数直接进 H264Encoder → avcodec_open2 ExternalError
+        assert (msg.width, msg.height) == (954, 910)
+        assert msg.keyframe and msg.data
+        pipe.close()

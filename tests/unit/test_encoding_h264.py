@@ -223,6 +223,76 @@ class TestQualityAndResolution:
         enc.close()
 
 
+class TestOddSizeAlignment:
+    """走查 bug 3：奇数分辨率（mss 窗口模式常态）被 libx264 拒 → 编码层向下取偶自兜底。"""
+
+    @pytest.mark.parametrize(
+        ("w", "h", "aw", "ah"),
+        [(955, 910, 954, 910), (1921, 1081, 1920, 1080)],
+    )
+    def test_odd_construct_opens_and_encodes(
+        self, w: int, h: int, aw: int, ah: int
+    ) -> None:
+        enc = H264Encoder(w, h)
+        assert (enc._width, enc._height) == (aw, ah)  # noqa: SLF001
+        ctx = enc._ctx  # noqa: SLF001
+        assert (ctx.width, ctx.height) == (aw, ah)
+        out = enc.encode(make_frame(1, w, h))
+        assert (out.width, out.height) == (aw, ah)
+        assert out.is_keyframe and out.data
+        enc.close()
+
+    def test_odd_stream_decodes_roundtrip(self) -> None:
+        """对齐后的奇数源流必须能被裸解码器完整解回。"""
+        enc = H264Encoder(65, 49)
+        chunks = [enc.encode(make_frame(i, 65, 49)).data for i in range(5)]
+        assert decode_all(chunks) == 5
+        enc.close()
+
+    def test_odd_source_rebuilds_once_not_every_frame(self) -> None:
+        """奇数源持续进来：跟随重建只发生一次，后续对齐同尺寸不得反复重建。"""
+        enc = H264Encoder(W, H)  # (64, 48)
+        enc.encode(make_frame(1, 80, 60))  # 尺寸变 → 跟随重建到 (80, 60)
+        ctx_after = enc._ctx  # noqa: SLF001
+        enc.encode(make_frame(2, 81, 61))  # 对齐 (80, 60) == 现尺寸 → 不重建
+        assert enc._ctx is ctx_after  # noqa: SLF001
+        enc.encode(make_frame(3, 81, 61))
+        assert enc._ctx is ctx_after  # noqa: SLF001
+        assert enc.stats().frames == 3
+        enc.close()
+
+    def test_set_resolution_odd_aligned_and_idempotent(self) -> None:
+        enc = H264Encoder(W, H)
+        enc.set_resolution(955, 911)
+        assert (enc._width, enc._height) == (954, 910)  # noqa: SLF001
+        ctx_before = enc._ctx  # noqa: SLF001
+        enc.set_resolution(954, 910)  # 与对齐值相同 → 幂等不重建
+        assert enc._ctx is ctx_before  # noqa: SLF001
+        enc.close()
+
+    def test_one_dimension_odd(self) -> None:
+        enc = H264Encoder(64, 49)
+        assert (enc._width, enc._height) == (64, 48)  # noqa: SLF001
+        out = enc.encode(make_frame(1, 64, 49))
+        assert (out.width, out.height) == (64, 48)
+        enc.close()
+
+    def test_tiny_sizes(self) -> None:
+        """2x2 可建可编；1x1 对齐后为 0，按尺寸过小拒绝。"""
+        enc = H264Encoder(2, 2)
+        out = enc.encode(make_frame(1, 2, 2))
+        assert (out.width, out.height) == (2, 2) and out.data
+        enc.close()
+        with pytest.raises(ValueError, match="过小"):
+            H264Encoder(1, 1)
+        enc2 = H264Encoder(W, H)
+        try:
+            with pytest.raises(ValueError, match="过小"):
+                enc2.set_resolution(1, 4096)
+        finally:
+            enc2.close()
+
+
 class TestStats:
     """统计快照。"""
 

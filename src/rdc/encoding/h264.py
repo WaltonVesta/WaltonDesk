@@ -71,6 +71,20 @@ DEFAULT_KEYFRAME_INTERVAL_SEC: Final = 2.0
 DEFAULT_FPS: Final = 30.0
 
 
+def _align_even(width: int, height: int) -> tuple[int, int]:
+    """尺寸向下取偶（yuv420p 要求宽高均为偶数，硬件编码器同样受此约束）。
+
+    mss 窗口模式抓到的分辨率常见奇数（如 955x910），直接送
+    ``avcodec_open2`` 会炸 ExternalError（走查 bug 3），编码层自兜底：
+    向下取偶，源帧多余的 1 行/1 列由 :meth:`H264Encoder._bgra_to_frame`
+    裁掉。对齐后不足 2x2 无意义，抛 ValueError。
+    """
+    aligned = (width & ~1, height & ~1)
+    if aligned[0] < 2 or aligned[1] < 2:
+        raise ValueError(f"编码尺寸过小: {width}x{height}（偶数对齐后须 ≥2x2）")
+    return aligned
+
+
 def _hardware_options(codec_name: str, crf: int, preset: str) -> dict[str, str]:
     """硬件编码器的 AVDictionary 选项映射（保守最小集）。
 
@@ -97,8 +111,8 @@ class H264Encoder(VideoEncoder):
     """libx264 编码器（ultrafast + zerolatency，全帧 H.264）。
 
     Args:
-        width: 初始帧宽（像素，须 >0）。
-        height: 初始帧高。
+        width: 初始帧宽（像素，须 >0；奇数向下取偶对齐，见 :func:`_align_even`）。
+        height: 初始帧高（同上；编码输出与 EncodedFrame 报告的是对齐后尺寸）。
         crf: 初始质量（钳制到 :data:`CRF_RANGE`）。
         fps: 名义帧率，用于 gop 换算（``gop = keyframe_interval_sec * fps``）。
         keyframe_interval_sec: 关键帧最大间隔（秒）。实测 gop≥30 后带宽不再
@@ -108,7 +122,7 @@ class H264Encoder(VideoEncoder):
         preset: x264 preset，默认 ultrafast（延迟优先）。
 
     Raises:
-        ValueError: 尺寸非法。
+        ValueError: 尺寸非法（≤0，或偶数对齐后不足 2x2，如 1x1）。
         RuntimeError: libx264 不可用（正常发行版不会出现；探测请用
             :mod:`rdc.encoding.hw_probe`，构造失败会在首帧编码时抛错）。
 
@@ -137,8 +151,7 @@ class H264Encoder(VideoEncoder):
             raise ValueError(f"fps 必须 >0，实得 {fps}")
         if not codec_name:
             raise ValueError("codec_name 不能为空")
-        self._width = width
-        self._height = height
+        self._width, self._height = _align_even(width, height)
         self._crf = max(CRF_RANGE[0], min(CRF_RANGE[1], crf))
         self._fps = fps
         self._preset = preset
@@ -204,9 +217,11 @@ class H264Encoder(VideoEncoder):
         if self._pending_rebuild:
             self._rebuild(self._width, self._height)
         height, width = int(frame.shape[0]), int(frame.shape[1])
-        if (width, height) != (self._width, self._height):
+        aligned = _align_even(width, height)
+        if aligned != (self._width, self._height):
             # 采集分辨率变了但没走 set_resolution：自动跟随，首帧必关键帧
-            self._rebuild(width, height)
+            # （先对齐再比较：源持续奇数尺寸时不会每帧误判重建）
+            self._rebuild(*aligned)
 
         t0 = time.perf_counter()
         ctx = self._ctx
@@ -234,8 +249,8 @@ class H264Encoder(VideoEncoder):
             data=data,
             is_keyframe=is_key,
             pts=self._pts - 1,
-            width=width,
-            height=height,
+            width=self._width,
+            height=self._height,
             quality=self._crf,
             elapsed_ms=elapsed_ms,
         )
@@ -258,12 +273,16 @@ class H264Encoder(VideoEncoder):
         self._force_next_keyframe = True
 
     def set_resolution(self, width: int, height: int) -> None:
-        """切换分辨率：立即重建编码器（libx264 不支持 in-place 改尺寸）。"""
+        """切换分辨率：立即重建编码器（libx264 不支持 in-place 改尺寸）。
+
+        奇数尺寸向下取偶后比较/重建（同 :meth:`__init__` 口径）。
+        """
         if width <= 0 or height <= 0:
             raise ValueError(f"编码尺寸非法: {width}x{height}")
-        if (width, height) == (self._width, self._height) and self._ctx is not None:
+        aligned = _align_even(width, height)
+        if aligned == (self._width, self._height) and self._ctx is not None:
             return
-        self._rebuild(width, height)
+        self._rebuild(*aligned)
 
     def stats(self) -> EncoderStats:
         """统计快照（``quality`` 为当前 CRF）。"""
@@ -345,6 +364,9 @@ class H264Encoder(VideoEncoder):
         有 padding 逐行写入目标缓冲的带距视图。
         """
         width, height = self._width, self._height
+        if frame.shape[0] != height or frame.shape[1] != width:
+            # 奇数源帧向下取偶后多出的 1 行/1 列在此裁掉（见 _align_even）
+            frame = frame[:height, :width]
         src = frame if frame.flags["C_CONTIGUOUS"] else np.ascontiguousarray(frame)
 
         # cv2.COLOR_BGRA2YUV_I420 输出扁平 (h*3//2 * w) uint8：Y 平面 + U + V
