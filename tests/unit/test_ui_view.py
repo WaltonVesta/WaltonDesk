@@ -196,9 +196,10 @@ class TestScreenView:
         assert v.scene().sceneRect().width() == 640  # noqa: SLF001
 
     def test_coord_identity_1to1(self, qapp, qtbot) -> None:
-        """无缩放无偏移：视口坐标 ≈ 远端坐标。"""
+        """1:1 模式（set_fit_mode(False)）无缩放无偏移：视口坐标 ≈ 远端坐标。"""
         v = self._shown(qtbot)
         qtbot.addWidget(v)
+        v.set_fit_mode(False)  # 第五批走查：默认已是 fit，1:1 语义显式切换验证
         img = QImage(640, 480, QImage.Format.Format_RGB32)
         v.present_image(img)
         rp = v.remote_pos(QPoint(100, 80))
@@ -219,10 +220,28 @@ class TestScreenView:
     def test_out_of_remote_bounds_returns_none(self, qapp, qtbot) -> None:
         v = self._shown(qtbot)
         qtbot.addWidget(v)
-        # 100x100 帧放进 400x300 视口：右下区域是黑边（越出远端屏）
+        v.set_fit_mode(False)  # 1:1：右下多余视口空间是黑边
+        # 100x100 帧放进 400x300 视口
         v.present_image(QImage(100, 100, QImage.Format.Format_RGB32))
         assert v.remote_pos(QPoint(5, 5)) is not None
         assert v.remote_pos(QPoint(350, 250)) is None
+
+    def test_fit_mode_black_borders_out_of_bounds(self, qapp, qtbot) -> None:
+        """第五批走查哨兵：默认 fit 等比放大居中，黑边区域不发输入。
+
+        100x100 帧进 400x300 视口 → 等比放大 3 倍（300x300）居中，
+        左右各 50px 黑边：视口角点落黑边返回 None，中心落画面内。
+        """
+        v = self._shown(qtbot)
+        qtbot.addWidget(v)
+        assert v.fit_mode  # 默认适应窗口（病灶：默认 False 画面卡左上）
+        v.present_image(QImage(100, 100, QImage.Format.Format_RGB32))
+        assert v.transform().m11() == pytest.approx(3.0, abs=0.1)  # 撑满高度维度
+        center = v.remote_pos(QPoint(200, 150))
+        assert center is not None
+        assert abs(center.x() - 50) < 2 and abs(center.y() - 50) < 2  # 帧正中
+        assert v.remote_pos(QPoint(5, 5)) is None  # 左侧黑边
+        assert v.remote_pos(QPoint(395, 5)) is None  # 右侧黑边
 
     def test_move_disabled_by_default_then_signals(self, qapp, qtbot) -> None:
         v = self._shown(qtbot)

@@ -25,7 +25,18 @@ v4 病灶不迁移：其坐标换算把"视图缩放因子"手算进除法且忽
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QImage, QInputMethodEvent, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QImage,
+    QInputMethodEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QWidget
 
 from rdc.ui.app import ensure_gui_thread
@@ -44,6 +55,11 @@ class ScreenView(QGraphicsView):
         textCommitted(str): IME 候选窗提交的已上屏文本（批 E 新增通道）。
         fitModeChanged(bool): 适应窗口开关（main_window 记忆用）。
 
+    缩放策略（走查第五批修正）：默认 **适应窗口**——等比缩放撑满视口某
+    一维度、居中、剩余黑边（VNC/TeamViewer 同语义）；``set_fit_mode(False)``
+    回 1:1 原始尺寸（左上对齐 + 滚动条）。坐标换算走 ``mapToScene`` 变换
+    矩阵，两种模式都天然正确。
+
     线程红线：所有方法仅 GUI 线程调用（qasync 主线程协程直调合法）。
     """
 
@@ -61,19 +77,20 @@ class ScreenView(QGraphicsView):
         scene.addItem(self._item)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        # 左上对齐：视口原点 = 场景原点（远桌面语义；Qt 默认居中会把
-        # 小帧居中浮显，坐标换算出现系统性偏移）
-        self.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
+        # 默认 fit：场景居中于视口（黑边对称）；1:1 模式切回左上对齐
+        # （远桌面语义，多余视口空间在右下）
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 黑边纯黑（主题 Base 色是深灰，等比缩放留边必须显式压黑）
+        self.setBackgroundBrush(QBrush(QColor(0, 0, 0)))
+        # 等比放大/缩小时平滑插值（远桌面文字不锯齿）
         self.setRenderHints(
-            self.renderHints()  # 保默认
+            self.renderHints() | QPainter.RenderHint.SmoothPixmapTransform
         )
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setMouseTracking(True)  # 悬停即回报移动
         self._input_enabled = False
-        self._fit_mode = False
+        self._fit_mode = True
         self._remote_origin = QPointF(0, 0)  # 帧在虚拟桌面的 (left, top)
         self._remote_size: tuple[int, int] | None = None
         self._placeholder = True
@@ -92,6 +109,7 @@ class ScreenView(QGraphicsView):
         ensure_gui_thread("ScreenView.present_image")
         if image.isNull():
             return
+        size_changed = self._remote_size != (image.width(), image.height())
         pix = QPixmap.fromImage(image)
         self._item.setPixmap(pix)
         self._item.setOffset(float(left), float(top))
@@ -101,12 +119,16 @@ class ScreenView(QGraphicsView):
         self.scene().setSceneRect(
             float(left), float(top), float(image.width()), float(image.height())
         )
-        # Qt 默认居中场景；远桌面语义是左上对齐（多余视口空间是右下黑边）
-        h_bar, v_bar = self.horizontalScrollBar(), self.verticalScrollBar()
-        h_bar.setValue(h_bar.minimum())
-        v_bar.setValue(v_bar.minimum())
         if self._fit_mode:
-            self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
+            # 分辨率变化（虚拟机窗口调整/切屏）才重算等比缩放；
+            # 每帧 fitInView 会让变换矩阵反复重设、画面抖动
+            if size_changed:
+                self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
+        else:
+            # 1:1 远桌面语义：左上对齐，多余视口空间是右下黑边
+            h_bar, v_bar = self.horizontalScrollBar(), self.verticalScrollBar()
+            h_bar.setValue(h_bar.minimum())
+            v_bar.setValue(v_bar.minimum())
 
     def clear_frame(self) -> None:
         """断开时清屏回到占位态。"""
@@ -130,14 +152,27 @@ class ScreenView(QGraphicsView):
         return self._input_enabled
 
     def set_fit_mode(self, fit: bool) -> None:
-        """适应窗口 / 1:1 原始尺寸（全屏切换的底层开关）。"""
+        """适应窗口（等比居中黑边）/ 1:1 原始尺寸（左上+滚动条）。"""
         ensure_gui_thread("ScreenView.set_fit_mode")
         self._fit_mode = fit
         if fit and self._remote_size is not None:
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
+        elif fit:
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.resetTransform()
         else:
+            self.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            )
             self.resetTransform()
         self.fitModeChanged.emit(fit)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt 覆写签名
+        """视口尺寸变化（拖窗/全屏进出）：fit 模式重算等比缩放。"""
+        super().resizeEvent(event)
+        if self._fit_mode and self._remote_size is not None:
+            self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
 
     @property
     def fit_mode(self) -> bool:

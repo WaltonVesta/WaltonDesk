@@ -60,6 +60,20 @@ class QualityIndicator(QWidget):
             self._apply(_OFFLINE, "offline", pulse=False)
             self._detail.setText("")
             return
+        if fps <= 0:
+            # 第五批走查：画面静止时 fps=0 是 idle 降载（framerate 控制器
+            # 语义），不代表链路差——等级只看延迟/丢包，详情显示 idle
+            if latency < 100 and packet_loss < 0.03:
+                grade, txt = _FINE, "good"
+            elif latency < 200 and packet_loss < 0.08:
+                grade, txt = _MEDIUM, "medium"
+            elif latency < 400 and packet_loss < 0.15:
+                grade, txt = _POOR, "poor"
+            else:
+                grade, txt = _BAD, "poor"
+            self._apply(grade, txt, pulse=True)
+            self._detail.setText(f"{latency:.0f}ms | idle")
+            return
         if latency < 50 and packet_loss < 0.01 and fps > 20:
             grade, txt = _GOOD, "good"
         elif latency < 100 and packet_loss < 0.03 and fps > 15:

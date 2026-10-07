@@ -283,6 +283,7 @@ class MainWindow(QMainWindow):
         ensure_gui_thread("MainWindow.metrics_updated")
         self.status_bar.set_latency(latency_ms)
         self.status_bar.set_quality(quality)
+        self.status_bar.set_resolution(resolution)
         self.performance_panel.update_metrics(
             fps=fps,
             latency_ms=latency_ms,
@@ -379,6 +380,7 @@ class MainWindow(QMainWindow):
                 _LOG.warning("disconnect_error", error=repr(exc))
         self._set_state(ConnectionState.DISCONNECTED)
         self.screen_view.clear_frame()
+        self.status_bar.set_resolution(None)
         self.toolbar.set_host_editable(True)
 
     def _on_control_toggled(self, enabled: bool) -> None:
@@ -434,12 +436,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_fullscreen(self) -> None:
         ensure_gui_thread("MainWindow._toggle_fullscreen")
+        # 第五批走查：fit（等比居中黑边）已是默认常驻策略，全屏切换只改窗口
+        # 模式——视口尺寸变化由 ScreenView.resizeEvent 自动重算缩放，
+        # 不再在此开关 fit（旧版退出全屏强切 1:1，窗口态又回到溢出老 bug）
         if self.isFullScreen():
             self.showNormal()
-            self.screen_view.set_fit_mode(False)
         else:
             self.showFullScreen()
-            self.screen_view.set_fit_mode(True)
 
     def _toggle_perf(self) -> None:
         ensure_gui_thread("MainWindow._toggle_perf")

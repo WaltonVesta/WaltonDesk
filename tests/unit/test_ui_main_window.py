@@ -33,15 +33,15 @@ class TestMainWindowInteractions:
         return w, c
 
     def test_fullscreen_toggle_pair(self, qapp, qtbot) -> None:
+        """第五批走查：fit 默认常驻，全屏切换只改窗口模式、不再动缩放。"""
         w, _ = self._win(qtbot)
+        assert w.screen_view.fit_mode  # 默认适应窗口
         w._toggle_fullscreen()  # noqa: SLF001
+        assert w.isFullScreen()
         assert w.screen_view.fit_mode
         w._on_escape()  # noqa: SLF001 - Esc 只在全屏时退出
-        assert not w.screen_view.fit_mode
-        w._toggle_fullscreen()
-        assert w.screen_view.fit_mode
-        w._toggle_fullscreen()  # noqa: SLF001 - 再点回普通
-        assert not w.screen_view.fit_mode
+        assert not w.isFullScreen()
+        assert w.screen_view.fit_mode  # 退出全屏保持 fit（旧版强切 1:1 即病灶）
 
     def test_perf_panel_visibility_toggles(self, qapp, qtbot) -> None:
         w, _ = self._win(qtbot)

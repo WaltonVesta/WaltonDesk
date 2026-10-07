@@ -30,7 +30,7 @@ _STATUS_COLORS: dict[str, str] = {
 
 
 class StatusBar(QFrame):
-    """底部状态条：状态 | 信息提示 |（右起）画质 延迟 FPS。"""
+    """底部状态条：状态 | 信息提示 |（右起）分辨率 画质 延迟 FPS。"""
 
     def __init__(self, parent: QFrame | None = None) -> None:
         ensure_gui_thread("StatusBar")
@@ -47,15 +47,17 @@ class StatusBar(QFrame):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setStyleSheet(f"color: {TOKENS.border};")
+        self._resolution = QLabel("")
         self._quality = QLabel("")
         self._latency = QLabel("")
         self._fps = QLabel("")
-        for lb in (self._quality, self._latency, self._fps):
+        for lb in (self._resolution, self._quality, self._latency, self._fps):
             lb.setStyleSheet(f"color: {TOKENS.text_dim};")
 
         lay.addWidget(self._status)
         lay.addWidget(sep)
         lay.addWidget(self._info, 1)
+        lay.addWidget(self._resolution)
         lay.addWidget(self._quality)
         lay.addWidget(self._latency)
         lay.addWidget(self._fps)
@@ -105,6 +107,14 @@ class StatusBar(QFrame):
         ensure_gui_thread("StatusBar.set_quality")
         self._quality.setText(f"画质: {quality}%" if quality is not None else "")
 
+    def set_resolution(self, resolution: tuple[int, int] | None) -> None:
+        """远端分辨率（第五批走查：状态栏可见）；``None`` 清除。"""
+        ensure_gui_thread("StatusBar.set_resolution")
+        if resolution is None:
+            self._resolution.setText("")
+        else:
+            self._resolution.setText(f"分辨率: {resolution[0]}x{resolution[1]}")
+
     def stop(self) -> None:
         """停 FPS 定时器（close 级联调用；幂等）。"""
         ensure_gui_thread("StatusBar.stop")
@@ -116,11 +126,17 @@ class StatusBar(QFrame):
         ensure_gui_thread("StatusBar._tick_fps")
         now = time.monotonic()
         span = now - self._fps_start
-        if span >= 1.0 and self._frame_count > 0:
+        if span < 1.0:
+            return
+        if self._frame_count > 0:
             self._fps_value = self._frame_count / span
             self._fps.setText(f"{self._fps_value:.1f} FPS")
-            self._frame_count = 0
-            self._fps_start = now
+        else:
+            # 第五批走查：画面静止（idle 档降载）时 0.0 FPS 观感差，改显 idle
+            self._fps_value = 0.0
+            self._fps.setText("idle")
+        self._frame_count = 0
+        self._fps_start = now
 
     @property
     def measured_fps(self) -> float:
