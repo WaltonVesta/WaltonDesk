@@ -60,9 +60,14 @@ AuthFailedHook = Callable[[str, str], None]
 #: ——基线语义不变（被拒 IP 不消耗 bcrypt、限流拒绝不泄露类别信息）。
 BanQuery = Callable[[str], float]
 
-#: 封禁回帧前消费对端 AuthRequest 的读取上限（秒）：对端不发帧（连接洪水）
-#: 即超时回落静默关流，与原拒绝路径同量级。
-BAN_NOTICE_READ_TIMEOUT = 5.0
+#: 封禁回帧前消费对端 AuthRequest 的读取上限（秒）。
+#: 走查第六批 Bug3：控制端 ``connect()`` 是 TLS → **弹口令框等真人输入** →
+#: 才发 AuthRequest，故本窗口必须覆盖真人打字时间——对齐合法握手预算
+#: :data:`HANDSHAKE_TIMEOUT`（旧固定 5s 短于打字耗时，真人慢输即被服务端超时
+#: 裸关、客户端得 ConnectionReset，banned 帧从未送达；集成测试的口令 provider
+#: 同步秒回，掩盖了该竞态）。洪水连接不发帧则超时静默关（开销与裸关同量级，
+#: 且已被限流器与封禁 IP 时间窗兜住）。
+BAN_NOTICE_READ_TIMEOUT = HANDSHAKE_TIMEOUT
 
 
 class ControlSession(StreamChannel):
@@ -225,6 +230,7 @@ class TransportServer:
             writer.close()
             return
         stream = FrameStream(reader, writer, name="control-reject")
+        replied = False
         try:
             got = await asyncio.wait_for(
                 stream.recv_message(), timeout=BAN_NOTICE_READ_TIMEOUT
@@ -238,9 +244,16 @@ class TransportServer:
                         ban_remaining_seconds=ceil(remaining),
                     )
                 )
+                replied = True
         except (OSError, TimeoutError):  # 写失败/请求未到：静默关，等同裸关语义
             pass
-        writer.close()
+        if replied:
+            # 回帧已 drain：走 FrameStream 优雅关闭（feed_eof + close + wait_closed
+            # 冲刷 TLS close_notify），对齐正常握手拒绝路径，杜绝裸关截断响应。
+            stream.close()
+            await stream.wait_closed()
+        else:
+            writer.close()
 
     async def _handle_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """控制端口：TLS 已由 asyncio 完成 → 准入 → 认证握手 → 会话交付。"""

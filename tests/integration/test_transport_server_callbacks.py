@@ -248,3 +248,80 @@ class TestBanNotice:
             await ch.close()
         finally:
             await server.stop()
+
+
+def _slow_password(delay: float):
+    """真人输口令替身：provider 睡眠 delay 秒后才"提交"口令（TLS 之后、发帧之前）。"""
+
+    async def _provider() -> str:
+        await asyncio.sleep(delay)
+        return "whatever"
+
+    return _provider
+
+
+class TestBanNoticeTypingRace:
+    """走查第六批 Bug3：回帧读窗口必须覆盖真人输口令耗时。
+
+    病灶：``_reject_control`` 旧用固定 5s 读窗口，而控制端 ``connect()`` 是
+    TLS → **弹框等真人打字** → 才发 AuthRequest；打字 >5s 即被服务端超时裸关，
+    客户端得 ``ConnectionResetError('Connection lost')``（用户真机原文），banned
+    帧从未送达、本地封禁缓存永不建立 → 每次白弹框。集成测试旧用例口令 provider
+    同步秒回，从未触发该竞态。
+    """
+
+    def test_window_covers_handshake_budget(self) -> None:
+        """不变式（病灶上转红）：窗口 = 合法握手预算，不再短于打字时间。"""
+        from rdc.transport.server import BAN_NOTICE_READ_TIMEOUT, HANDSHAKE_TIMEOUT
+
+        assert BAN_NOTICE_READ_TIMEOUT == HANDSHAKE_TIMEOUT
+        assert HANDSHAKE_TIMEOUT >= 10  # 真人输口令量级（旧 5s 不够）
+
+    async def test_within_budget_slow_typist_still_gets_notice(
+        self, certs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """窗口内：客户端 0.2s 发帧 < 2.0s 窗口 → 走新优雅关闭路径送达 banned 帧。"""
+        import rdc.transport.server as srv
+
+        monkeypatch.setattr(srv, "BAN_NOTICE_READ_TIMEOUT", 2.0)
+        server, ctrl_port, _ = await _run_server(
+            certs, check_client=lambda ip: False, ban_query=lambda ip: 90.0
+        )
+        try:
+            ch = ControlChannel(
+                "127.0.0.1",
+                ctrl_port,
+                password_provider=_slow_password(0.2),
+                fingerprint_confirm=_confirm,
+            )
+            with pytest.raises(AuthBannedError) as ei:
+                await asyncio.wait_for(ch.connect(), timeout=5)
+            assert ei.value.remaining_seconds == 90
+            await ch.close()
+        finally:
+            await server.stop()
+
+    async def test_outlasts_window_gets_reset_not_notice(
+        self, certs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """超出窗口：0.6s 发帧 > 0.2s 窗口 → 服务端未回帧裸关 → 客户端见 OSError/reset
+        （正是用户真机症状），证明竞态机制；此路径走 ``replied=False`` 的裸关分支。"""
+        import rdc.transport.server as srv
+
+        monkeypatch.setattr(srv, "BAN_NOTICE_READ_TIMEOUT", 0.2)
+        server, ctrl_port, _ = await _run_server(
+            certs, check_client=lambda ip: False, ban_query=lambda ip: 90.0
+        )
+        try:
+            ch = ControlChannel(
+                "127.0.0.1",
+                ctrl_port,
+                password_provider=_slow_password(0.6),
+                fingerprint_confirm=_confirm,
+            )
+            with pytest.raises((AuthError, OSError)) as ei:
+                await asyncio.wait_for(ch.connect(), timeout=5)
+            assert not isinstance(ei.value, AuthBannedError)  # banned 帧未送达 = 用户所见
+            await ch.close()
+        finally:
+            await server.stop()
