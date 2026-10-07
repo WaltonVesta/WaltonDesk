@@ -40,6 +40,8 @@ PKT_TYPE_AUTH_RESPONSE: Final[int] = 0x11
 PKT_TYPE_KEY_EVENT: Final[int] = 0x12
 # v5 阶段 4 新增：画面通道加入帧（一次性令牌 + nonce 握手）
 PKT_TYPE_SESSION_JOIN: Final[int] = 0x13
+# 走查第六批 P0 新增：服务端状态下行（画面停滞/安全桌面提示，控制端口主动发）
+PKT_TYPE_HOST_STATUS: Final[int] = 0x14
 PKT_TYPE_STREAM_CONTROL: Final[int] = 0x20
 
 # ---------------------------------------------------------------------------

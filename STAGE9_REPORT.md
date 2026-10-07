@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略（五批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1441 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）（六批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1462 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -181,7 +181,17 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **哨兵测试补齐·第五批**（1 项新增 + 3 项适配）：`test_fit_mode_black_borders_out_of_bounds`——默认 fit 断言 + 100×100 帧进 400×300 视口缩放因子 =3（撑满高度维）+ 中心点坐标映射正确 + 左右黑边 `remote_pos` 返回 None（病灶上默认 1:1 直接红）；既有 2 个 1:1 坐标用例显式 `set_fit_mode(False)` 保留原语义验证；`test_fullscreen_toggle_pair` 重写为"fit 常驻、切换只动窗口模式"。
 
-**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验），待用户重测确认；封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
+**已发现并修复第 6 项（2026-10-08，阶段 5 采集层引入；P0 可用性）**：
+
+| 项 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1.2 UAC 后画面永久停 | 被控端弹 UAC 点"是"后，主控端画面永久停在提权前最后一帧（控制同步失效），服务端持续报"屏幕采集失败 BitBlt" + "SendInput 部分失败"，直至会话结束不恢复 | **三层病灶**：① mss MSS() 的 GDI 句柄在安全桌面切换后**永久失效**，而 v5 采集源从不重建（阶段 5 未覆盖）；② pipeline `_produce` 对 ScreenCaptureError 零处理 → **采集 task 直接崩溃**（"Task exception was never retrieved"），画面流永久停摆；③ 安全桌面期间 SendInput 必然失败（Windows 安全边界，非缺陷），但每事件刷一条 error 日志 | **自愈闭环 + 状态可观测**：① `mss_source._grab_bgra` 失败路径挂 `_rebuild_backend`（close+重建 MSS()，保留选屏索引；重建失败置空句柄、下一帧入口继续重试自愈）；② `pipeline._produce` 捕获采集异常返回 IDLE+指数退避（0.25s→2s 封顶），**不再崩 task**；连续 3 次失败沿边触发 `capture_stall_hook`、恢复时通知（事件循环线程消费边沿，executor 线程零回调红线）；③ 控制端口新增 `HostStatus`（payload 0x14，proto 只增）下行：service 把停滞/恢复 + `OpenInputDesktop` 桌面探针判定（`capture/desktop.py` 新模块，非 Windows/任何 API 失败一律 False）广播到全部控制会话；④ 注入失败降级 warning + 同类 5s 节流（被抑制条数计入下条日志）；⑤ UI：controller `_on_control_message` 解析 → `host_status` 事件 → 状态栏 warn 直显"远端处于安全桌面（UAC 确认中），画面暂停——操作完成后自动恢复"，恢复回常态 |
+
+**哨兵测试补齐·第六批 P0**（21 项）：`TestHandleRebuild` 采集重建 3（失败即重建+旧句柄关闭/选屏索引保留/重建失败下帧自愈）+ `TestCaptureBackoffAndStall` 退避回调 4（失败返回退避不崩/翻倍封顶 2s/阈值 3 触发一次+恢复通知/回调在事件循环线程红线）+ `test_capture_desktop.py` 探针 8（平台门/windll 缺失/句柄 0/查询失败/CloseDesktop 抛错吞掉/winlogon 与 Default 检出）+ `TestHostStatusBroadcast` 集成 2（真实控制会话收到下行含 secure_desktop 归因与恢复 OK/无会话不抛）+ controller 入站 2 + UI 提示 2。stash 回退行为层四文件双红验证：**8 项在病灶上转红**（含 task 直接崩、`capture_stall_hook` 参数不存在、`HostStatus` 被 `control_unexpected_inbound` 吞三种失败形态），恢复后目标 108 项全绿。
+
+**v5.1.0 特权操作范围（本批记入文档，不在 v5.0.0 实现）**：v5.0.0 对安全桌面的正确行为止于"如实提示 + UAC 结束后自愈"——进入安全桌面（看/操作 UAC 弹窗本身）受 Windows 安全边界限制，需要：① Windows 服务化（SYSTEM 权限，Session 0 常驻）；② UIAccess=true 声明（EV 代码签名证书 + 受保护安装目录）；③ 安全桌面内画面采集与键鼠注入（TeamViewer "支持 UAC" 同级能力）；④ 驱动级采集兜底（如 BitBlt 长期不可用场景，按需）；⑤ 服务 ↔ 用户态会话通信通道。
+
+**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复画面流）。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
 

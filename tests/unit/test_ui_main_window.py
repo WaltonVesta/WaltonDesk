@@ -179,3 +179,27 @@ class TestMainWindowInteractions:
         assert w.state == ConnectionState.DISCONNECTED
         assert "取消" in text and "失败" not in text, text
         assert w.toolbar._host.isEnabled()  # noqa: SLF001
+
+
+class TestHostStatusHint:
+    """走查第六批 P0：安全桌面停滞提示直上状态栏（warn），恢复回常态。"""
+
+    def _win(self, qtbot, *, ctrl: FakeController | None = None, settings: Settings | None = None):
+        c = ctrl or FakeController()
+        w = MainWindow(c, settings=settings)
+        qtbot.addWidget(w)
+        return w, c
+
+    def test_secure_desktop_stall_shows_hint(self, qtbot) -> None:
+        w, _ = self._win(qtbot)
+        w.host_status(stalled=True, secure_desktop=True)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert "安全桌面" in text and "UAC" in text, text
+
+    def test_plain_stall_and_recovery(self, qtbot) -> None:
+        w, _ = self._win(qtbot)
+        w.host_status(stalled=True, secure_desktop=False)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert "采集异常" in text, text
+        w.host_status(stalled=False, secure_desktop=False)
+        assert "恢复" in w.status_bar._status.text(), w.status_bar._status.text()  # noqa: SLF001

@@ -119,9 +119,19 @@ def heartbeats(draw: st.DrawFn) -> M.Heartbeat:
     return M.Heartbeat(kind=draw(st.sampled_from(list(M.HeartbeatKind))), timestamp=draw(_floats))
 
 
+@st.composite
+def host_statuses(draw: st.DrawFn) -> M.HostStatus:
+    return M.HostStatus(
+        code=draw(st.sampled_from(list(M.HostStatusCode))),
+        secure_desktop=draw(st.booleans()),
+        detail=draw(_text),
+    )
+
+
 _message_strategies = st.one_of(
     auth_requests(), auth_responses(), screen_frames(), mouse_events(), key_events(),
     clipboard_events(), stream_controls(), config_controls(), heartbeats(),
+    host_statuses(),
 )
 
 _HYPOTHESIS_SETTINGS = settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])

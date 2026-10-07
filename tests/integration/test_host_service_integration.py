@@ -30,6 +30,8 @@ from rdc.protocol.messages import (
     Codec,
     Heartbeat,
     HeartbeatKind,
+    HostStatus,
+    HostStatusCode,
     KeyAction,
     KeyEvent,
     MouseAction,
@@ -390,5 +392,54 @@ class TestScreenSession:
                 await replay.connect()
             await replay.close()
             await ch.close()
+        finally:
+            await svc.shutdown()
+
+
+class TestHostStatusBroadcast:
+    """走查第六批 P0：画面停滞/恢复经控制端口主动下行到客户端。"""
+
+    async def test_stall_and_recovery_broadcast(
+        self, tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import rdc.server.service as svc_mod
+
+        monkeypatch.setattr(svc_mod, "is_secure_desktop", lambda: True)
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            ch = _control(s)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+
+            svc._on_capture_stall(True, "屏幕采集失败: BitBlt failed")  # noqa: SLF001
+            msg = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(msg, HostStatus)
+            assert msg.code is HostStatusCode.SCREEN_STALLED
+            assert msg.secure_desktop is True
+            assert "BitBlt" in msg.detail
+
+            svc._on_capture_stall(False, "")  # noqa: SLF001
+            ok = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(ok, HostStatus) and ok.code is HostStatusCode.OK
+
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
+    async def test_stall_without_session_no_raise(
+        self, tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无控制会话时停滞回调不得抛错（服务可先于连接进入停滞）。"""
+        import rdc.server.service as svc_mod
+
+        monkeypatch.setattr(svc_mod, "is_secure_desktop", lambda: False)
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            svc._on_capture_stall(True, "no session")  # noqa: SLF001
+            svc._on_capture_stall(False, "")  # noqa: SLF001
         finally:
             await svc.shutdown()

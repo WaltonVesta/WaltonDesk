@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rdc.capture.desktop import is_secure_desktop
 from rdc.capture.framerate import FramerateController
 from rdc.capture.mss_source import MssScreenSource
 from rdc.capture.source import ScreenSource
@@ -54,6 +55,8 @@ from rdc.protocol.messages import (
     ClipboardEvent,
     Heartbeat,
     HeartbeatKind,
+    HostStatus,
+    HostStatusCode,
     KeyAction,
     KeyEvent,
     Message,
@@ -156,6 +159,9 @@ class HostService:
         self._pipeline_task: asyncio.Task[None] | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._control_sessions: set[ControlSession] = set()
+        self._status_tasks: set[asyncio.Task[None]] = set()
+        #: 注入失败日志节流：event -> (上次记录时刻 monotonic, 被抑制条数)
+        self._inject_log_state: dict[str, tuple[float, int]] = {}
         self._paused = False
         self._should_exit = False
         self._start_time = 0.0
@@ -354,7 +360,35 @@ class HostService:
                 initial_crf=_quality_to_crf(s.jpeg_quality), target_fps=float(s.max_fps)
             ),
             signals_provider=self._net_signals,
+            capture_stall_hook=self._on_capture_stall,
         )
+
+    def _on_capture_stall(self, stalled: bool, detail: str) -> None:
+        """采集停滞/恢复边沿（事件循环线程，pipeline 红线）→ 控制会话广播。
+
+        安全桌面归因用桌面探针即时判定（停滞当下 UAC 可能仍在/已结束，
+        探针如实反映）；HostStatus 发送失败（会话已关）单个隔离，不影响
+        其余会话，也不波及采集循环。
+        """
+        code = HostStatusCode.SCREEN_STALLED if stalled else HostStatusCode.OK
+        status = HostStatus(
+            code=code,
+            secure_desktop=is_secure_desktop() if stalled else False,
+            detail=detail,
+        )
+        if stalled:
+            _LOG.warning("capture_stalled", detail=detail, secure_desktop=status.secure_desktop)
+        else:
+            _LOG.info("capture_recovered")
+        for session in list(self._control_sessions):
+            with contextlib.suppress(Exception):  # 单会话发送失败隔离
+                self._spawn_control_send(session, status)
+
+    def _spawn_control_send(self, session: ControlSession, msg: Message) -> None:
+        """异步下发一条服务端主动消息（fire-and-forget，任务异常自记）。"""
+        task = asyncio.get_running_loop().create_task(session.send(msg))
+        self._status_tasks.add(task)
+        task.add_done_callback(self._status_tasks.discard)
 
     def _net_signals(self) -> RaterSignals:
         """服务侧网络信号：RTT/丢包在 S→C 单向流上无测量源（v4 BandwidthProbe
@@ -423,6 +457,25 @@ class HostService:
             except Exception as exc:  # InputControlError 等：兜底记录不静默（约束 6）
                 _LOG.error("input_reset_failed", error=repr(exc))
 
+    #: 注入失败日志节流窗口（秒）：安全桌面期间每事件必失败，防刷屏。
+    _INJECT_LOG_WINDOW_S = 5.0
+
+    def _log_inject_failure(self, event: str, ip: str, exc: BaseException) -> None:
+        """注入失败降级记录（走查第六批 P0）：warning + 同类 5s 节流。
+
+        被抑制的条数计入下一条日志（可观测性不打折：刷屏被止住，但总量
+        仍能看出规模）。恢复后首条立即输出。
+        """
+        now = time.monotonic()
+        last, suppressed = self._inject_log_state.get(event, (0.0, 0))
+        if now - last < self._INJECT_LOG_WINDOW_S:
+            self._inject_log_state[event] = (last, suppressed + 1)
+            return
+        self._inject_log_state[event] = (now, 0)
+        _LOG.warning(
+            event, client=ip, error=repr(exc), suppressed=f"前 {suppressed} 条同类已抑制"
+        )
+
     def _apply_mouse(self, ev: MouseEvent, ip: str) -> None:
         """鼠标事件 → :class:`InputBackend`（坐标=远端虚拟桌面绝对坐标，D32）。"""
         backend = self._get_input_backend()
@@ -444,7 +497,9 @@ class HostService:
                 _LOG.warning("mouse_action_unsupported", client=ip, action=ev.action.name)
                 return
         except Exception as exc:  # 单事件注入失败不断流，可观测（约束 6）
-            _LOG.error("mouse_inject_failed", client=ip, error=repr(exc))
+            # 走查第六批 P0：安全桌面期间 SendInput 必然持续失败（属 Windows
+            # 安全边界而非缺陷），降级 warning + 节流，避免每鼠标移动刷一条 error。
+            self._log_inject_failure("mouse_inject_failed", ip, exc)
             return
         self._audit.control(EVENTS.Ctrl.MOUSE, ip=ip, action=ev.action.name)
 
@@ -466,7 +521,7 @@ class HostService:
                 _LOG.warning("key_action_unsupported", client=ip, action=ev.action.name)
                 return
         except Exception as exc:
-            _LOG.error("key_inject_failed", client=ip, error=repr(exc))
+            self._log_inject_failure("key_inject_failed", ip, exc)
             return
         self._audit.control(EVENTS.Ctrl.KEY, ip=ip, action=ev.action.name)
 

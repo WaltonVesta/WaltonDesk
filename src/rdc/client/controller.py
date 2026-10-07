@@ -67,6 +67,8 @@ from rdc.protocol.messages import (
     Codec,
     Heartbeat,
     HeartbeatKind,
+    HostStatus,
+    HostStatusCode,
     KeyAction,
     KeyEvent,
     Message,
@@ -413,6 +415,20 @@ class ClientController:
             return
         if isinstance(msg, ClipboardEvent):
             self._dispatch_event("clipboard_from_remote", msg.text)
+            return
+        if isinstance(msg, HostStatus):
+            if msg.code is HostStatusCode.SCREEN_STALLED:
+                _LOG.warning(
+                    "host_status_stalled",
+                    secure_desktop=msg.secure_desktop,
+                    detail=msg.detail,
+                )
+            else:
+                _LOG.info("host_status_ok")
+            self._dispatch_event(
+                "host_status", stalled=msg.code is HostStatusCode.SCREEN_STALLED,
+                secure_desktop=msg.secure_desktop,
+            )
             return
         _LOG.debug("control_unexpected_inbound", type=type(msg).__name__)
 

@@ -31,6 +31,8 @@ __all__ = [
     "Codec",
     "Heartbeat",
     "HeartbeatKind",
+    "HostStatus",
+    "HostStatusCode",
     "KeyEvent",
     "KeyAction",
     "Message",
@@ -67,6 +69,7 @@ class PayloadType(IntEnum):
     AUTH_RESPONSE = C.PKT_TYPE_AUTH_RESPONSE
     KEY_EVENT = C.PKT_TYPE_KEY_EVENT
     SESSION_JOIN = C.PKT_TYPE_SESSION_JOIN
+    HOST_STATUS = C.PKT_TYPE_HOST_STATUS
     STREAM_CONTROL = C.PKT_TYPE_STREAM_CONTROL
 
 
@@ -375,6 +378,34 @@ class Heartbeat:
         return PayloadType.HEARTBEAT
 
 
+class HostStatusCode(IntEnum):
+    """服务端状态码（与 proto ``HostStatusCode`` 数值逐一对齐）。"""
+
+    OK = 1
+    SCREEN_STALLED = 2
+
+
+@dataclass(frozen=True)
+class HostStatus:
+    """服务端状态主动下行（S→C，控制端口；走查第六批 P0 画面停滞提示）。
+
+    Attributes:
+        code: 状态码（OK=画面流正常/恢复；SCREEN_STALLED=连续采集失败）。
+        secure_desktop: 停滞当下服务端桌面探针判定是否处于安全桌面
+            （UAC 提权界面，普通用户态无法采集/注入）。
+        detail: 人读诊断（最近一次采集错误原文），客户端仅记日志。
+    """
+
+    code: HostStatusCode
+    secure_desktop: bool = False
+    detail: str = ""
+
+    @property
+    def payload_type(self) -> PayloadType:
+        """返回 HOST_STATUS。"""
+        return PayloadType.HOST_STATUS
+
+
 #: 所有领域消息的联合类型（codec / 上层分发用）
 Message = (
     AuthRequest
@@ -386,4 +417,5 @@ Message = (
     | ClipboardEvent
     | StreamControl
     | Heartbeat
+    | HostStatus
 )

@@ -29,6 +29,7 @@ enum PayloadType {
   PAYLOAD_STREAM_CONTROL = 0x20;      // C→S
   PAYLOAD_HEARTBEAT = 0x03;           // 双向
   PAYLOAD_SESSION_JOIN = 0x13;        // C→S（画面通道令牌 + nonce 握手，v5 阶段 4）
+  PAYLOAD_HOST_STATUS = 0x14;         // S→C（控制端口主动下行：服务端状态变化，走查第六批 P0）
 }
 
 // ---------------------------------------------------------------------------
@@ -194,4 +195,19 @@ enum HeartbeatKind {
 message Heartbeat {
   HeartbeatKind kind = 1;
   double timestamp = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 服务端状态（S→C，控制端口主动下行；走查第六批 P0 画面停滞/安全桌面提示）
+// ---------------------------------------------------------------------------
+enum HostStatusCode {
+  HOST_STATUS_UNSPECIFIED = 0;
+  HOST_STATUS_OK = 1;               // 画面流正常（含从停滞恢复）
+  HOST_STATUS_SCREEN_STALLED = 2;   // 连续采集失败（典型：安全桌面/UAC 句柄失效）
+}
+
+message HostStatus {
+  HostStatusCode code = 1;
+  bool secure_desktop = 2;          // 停滞当下 OpenInputDesktop 探针判定
+  string detail = 3;                // 人读诊断（最近一次采集错误原文）
 }

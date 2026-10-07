@@ -67,6 +67,7 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def _mss_ctor() -> FakeMSS:
         backend = FakeMSS()
         created["backend"] = backend
+        created["count"] = created.get("count", 0) + 1
         return backend
 
     def _forbidden_mss_func(*a: Any, **k: Any) -> Any:  # 硬约束 ①
@@ -247,3 +248,69 @@ class TestStatsAndSwitch:
         src = MssScreenSource()
         src.close()
         assert fake_backend["backend"].closed
+
+
+class TestHandleRebuild:
+    """句柄失效自愈（走查第六批 P0：安全桌面切换后 MSS 重建）。"""
+
+    def test_grab_failure_rebuilds_backend(self, fake_backend: dict[str, Any]) -> None:
+        src = MssScreenSource()
+        first = fake_backend["backend"]
+
+        def _boom(region: dict[str, int]) -> Any:
+            raise OSError("BitBlt failed on secure desktop")
+
+        first.grab = _boom  # type: ignore[method-assign]
+        with pytest.raises(ScreenCaptureError, match="屏幕采集失败"):
+            src.capture()
+        # 失败路径触发重建：旧句柄关闭，新句柄已构造（夹具计数 2）
+        assert first.closed
+        assert fake_backend["count"] == 2
+        # 自愈：新句柄 grab 正常，下一帧直接出
+        frame = src.capture()
+        assert frame.size == (640, 240)
+        src.close()
+
+    def test_rebuild_preserves_selected_monitor(self, fake_backend: dict[str, Any]) -> None:
+        src = MssScreenSource()
+        src.set_monitor(2)
+
+        def _boom(region: dict[str, int]) -> Any:
+            raise OSError("display off")
+
+        fake_backend["backend"].grab = _boom  # type: ignore[method-assign]
+        with pytest.raises(ScreenCaptureError):
+            src.capture()
+        # 重建后仍选中原屏（索引 2），采集目标不漂移
+        assert src.current_monitor.index == 2
+        src.close()
+
+    def test_rebuild_failure_selfheals_next_capture(
+        self, fake_backend: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = MssScreenSource()
+        boom_backend = fake_backend["backend"]
+        calls = {"n": 0}
+
+        def _ctor() -> FakeMSS:
+            calls["n"] += 1
+            if calls["n"] == 1:  # 重建那一次构造失败（句柄资源未就绪）
+                raise OSError("handle unavailable")
+            backend = FakeMSS()
+            fake_backend["backend"] = backend
+            return backend
+
+        monkeypatch.setattr(mss_module.mss, "MSS", _ctor)
+
+        def _boom(region: dict[str, int]) -> Any:
+            raise OSError("BitBlt failed on secure desktop")
+
+        boom_backend.grab = _boom  # type: ignore[method-assign]
+        with pytest.raises(ScreenCaptureError, match="屏幕采集失败"):
+            src.capture()
+        # 重建失败 → 句柄置空（不崩）；下一帧入口自愈重试构造成功 → 出帧
+        assert calls["n"] == 1
+        frame = src.capture()
+        assert frame.size == (640, 240)
+        assert calls["n"] == 2
+        src.close()

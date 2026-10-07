@@ -131,6 +131,10 @@ class ClientEvents(Protocol):
 
     def clipboard_from_remote(self, text: str) -> None: ...
 
+    def host_status(self, *, stalled: bool, secure_desktop: bool) -> None:
+        """服务端状态下行（走查第六批 P0）：画面停滞/恢复，含安全桌面归因。"""
+        ...
+
     def clipboard_image_from_remote(self, image: QImage) -> None:
         """远端图片写入本地剪贴板（批 E 扩展；阶段 9 实现）。"""
         ...
@@ -302,6 +306,24 @@ class MainWindow(QMainWindow):
         ensure_gui_thread("MainWindow.clipboard_from_remote")
         if self._settings.enable_clipboard:
             self.clipboard.apply_remote(text)
+
+    def host_status(self, *, stalled: bool, secure_desktop: bool) -> None:
+        """ClientEvents：服务端画面停滞/恢复（走查第六批 P0，安全桌面提示）。
+
+        停滞且探针判定安全桌面 → 提示"远端正在安全桌面（如 UAC 确认中），
+        画面暂停"；普通停滞 → 提示采集异常等待自愈；恢复 → 状态栏回常态。
+        """
+        ensure_gui_thread("MainWindow.host_status")
+        if stalled:
+            if secure_desktop:
+                self.status_bar.set_status(
+                    "远端处于安全桌面（UAC 确认中），画面暂停——操作完成后自动恢复",
+                    "warn",
+                )
+            else:
+                self.status_bar.set_status("远端画面采集异常，等待自动恢复…", "warn")
+        else:
+            self.status_bar.set_status("画面已恢复", "connected")
 
     def clipboard_image_from_remote(self, image: QImage) -> None:
         """ClientEvents：远端剪贴板图片写入本地（批 E）。"""

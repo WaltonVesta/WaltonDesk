@@ -39,10 +39,11 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from rdc.capture.diff import ScreenDiffer
-from rdc.capture.framerate import FrameDecision, FramerateController
+from rdc.capture.framerate import FrameAction, FrameDecision, FramerateController
 from rdc.capture.source import ScreenSource
 from rdc.encoding.hw_probe import best_encoder
 from rdc.encoding.raters import RaterSignals
+from rdc.exceptions import ScreenCaptureError
 from rdc.logging import get_logger
 from rdc.protocol.messages import ScreenFrame
 
@@ -73,6 +74,15 @@ def default_codec_name() -> str:
 
 EncoderFactory = Callable[[int, int], "VideoEncoder"]
 SignalsProvider = Callable[[], "RaterSignals | None"]
+#: 采集停滞回调：``fn(stalled: bool, detail: str)``（连续失败达阈值 True，
+#: 任一成功帧 False）。走查第六批 P0：安全桌面/句柄失效期间供服务层提示 UI。
+CaptureStallHook = Callable[[bool, str], None]
+
+#: 采集失败退避：0.25s 起指数翻倍、封顶 2s（句柄失效多为秒级窗口，快速自愈）。
+_CAPTURE_BACKOFF_BASE_S = 0.25
+_CAPTURE_BACKOFF_MAX_S = 2.0
+#: 连续失败达到该数判定"画面停滞"（≈1.75s 退避窗口），触发一次回调防刷屏。
+_CAPTURE_STALL_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -134,6 +144,7 @@ class ScreenPipeline:
         rater: AdaptiveRater | None = None,
         signals_provider: SignalsProvider | None = None,
         executor: Executor | None = None,
+        capture_stall_hook: CaptureStallHook | None = None,
     ) -> None:
         self._source = source
         self._broadcaster = broadcaster
@@ -162,6 +173,9 @@ class ScreenPipeline:
         self._capture_ms = 0.0
         self._last_reason = ""
         self._closed = False
+        self._capture_stall_hook = capture_stall_hook
+        self._capture_fail_streak = 0
+        self._stall_pending: tuple[bool, str] | None = None
 
     # -- 公共 API ---------------------------------------------------------------
 
@@ -208,8 +222,20 @@ class ScreenPipeline:
         msg, decision = unit
         if msg is not None:
             self._broadcaster.publish(msg)  # 事件循环线程（红线，见模块 docstring）
+        self._flush_stall_edge()
         self._observe_rater()
         return decision
+
+    def _flush_stall_edge(self) -> None:
+        """在事件循环线程消费采集停滞边沿（executor 线程零回调红线）。"""
+        edge = self._stall_pending
+        if edge is None:
+            return
+        self._stall_pending = None
+        stalled, detail = edge
+        if self._capture_stall_hook is not None:
+            with contextlib.suppress(Exception):  # 回调异常不得波及采集循环
+                self._capture_stall_hook(stalled, detail)
 
     async def run(self, *, stop: asyncio.Event) -> None:
         """主循环：持续到 ``stop`` 置位。
@@ -243,13 +269,38 @@ class ScreenPipeline:
     # -- 生产者单元（executor 线程内） -------------------------------------------
 
     def _produce(self) -> tuple[ScreenFrame | None, FrameDecision] | None:
-        """capture → diff → decide →（必要时）encode。返回值交事件循环发布。"""
+        """capture → diff → decide →（必要时）encode。返回值交事件循环发布。
+
+        采集失败自愈（走查第六批 P0）：``ScreenCaptureError``（mss 句柄失效，
+        典型场景 = 被控端安全桌面/UAC 切换）不再让 task 崩溃——本周期返回
+        ``IDLE`` 决策 + 指数退避（0.25s→2s 封顶）。采集源内部已挂 MSS 重建，
+        退避期间每轮重试即自愈。连续失败第 :data:`_CAPTURE_STALL_THRESHOLD`
+        次记录停滞边沿（``_stall_pending``），由 :meth:`run_once` 在事件循环
+        线程消费并触发 ``capture_stall_hook``（红线：executor 线程零回调）。
+        """
         if self._closed:
             return None
         t_cap = time.perf_counter()
-        frame = self._source.capture()
+        try:
+            frame = self._source.capture()
+        except ScreenCaptureError as exc:
+            self._capture_ms += (time.perf_counter() - t_cap) * 1000.0
+            self._capture_fail_streak += 1
+            if self._capture_fail_streak == _CAPTURE_STALL_THRESHOLD:
+                self._stall_pending = (True, str(exc))
+            backoff = min(
+                _CAPTURE_BACKOFF_BASE_S * (2 ** (self._capture_fail_streak - 1)),
+                _CAPTURE_BACKOFF_MAX_S,
+            )
+            return None, FrameDecision(
+                action=FrameAction.IDLE, fps=0.0, delay_s=backoff, reason="capture_failed"
+            )
         self._capture_ms += (time.perf_counter() - t_cap) * 1000.0
         self._captured += 1
+        if self._capture_fail_streak:
+            # 恢复出帧（停滞→正常边沿，同样只在阈值翻转时报一次）
+            self._capture_fail_streak = 0
+            self._stall_pending = (False, "")
 
         diff = self._differ.compare(frame.data, adopt=True)
         decision = self._framerate.decide(diff, self._signals_snapshot())

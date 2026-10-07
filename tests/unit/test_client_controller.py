@@ -26,6 +26,8 @@ from rdc.protocol.messages import (
     Codec,
     Heartbeat,
     HeartbeatKind,
+    HostStatus,
+    HostStatusCode,
     KeyAction,
     KeyEvent,
     MouseAction,
@@ -535,6 +537,29 @@ class TestInboundDispatch:
         await connect_ok(ctl)
         ctl._on_control_message(ClipboardEvent(text="远端文本"))  # noqa: SLF001
         assert got == ["远端文本"]
+
+    async def test_host_status_stalled_dispatched(self) -> None:
+        """服务端画面停滞 → UI 事件（含安全桌面归因）原样转发（走查第六批 P0）。"""
+        ctl, _ = make_ctrl()
+        got: list[dict[str, object]] = []
+        ctl.set_events(
+            SimpleNamespace(host_status=lambda **kw: got.append(kw))
+        )
+        await connect_ok(ctl)
+        ctl._on_control_message(  # noqa: SLF001
+            HostStatus(code=HostStatusCode.SCREEN_STALLED, secure_desktop=True, detail="BitBlt")
+        )
+        assert got == [{"stalled": True, "secure_desktop": True}]
+
+    async def test_host_status_ok_dispatch_recovery(self) -> None:
+        ctl, _ = make_ctrl()
+        got: list[dict[str, object]] = []
+        ctl.set_events(
+            SimpleNamespace(host_status=lambda **kw: got.append(kw))
+        )
+        await connect_ok(ctl)
+        ctl._on_control_message(HostStatus(code=HostStatusCode.OK))  # noqa: SLF001
+        assert got == [{"stalled": False, "secure_desktop": False}]
 
     async def test_send_clipboard_outbound(self) -> None:
         ctl, _ = make_ctrl()

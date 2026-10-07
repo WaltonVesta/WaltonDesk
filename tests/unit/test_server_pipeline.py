@@ -425,3 +425,115 @@ class TestOddResolutionEndToEnd:
         assert (msg.width, msg.height) == (954, 910)
         assert msg.keyframe and msg.data
         pipe.close()
+
+
+# ---------------------------------------------------------------------------
+# 走查第六批 P0：采集失败退避不崩 + 停滞边沿回调（安全桌面自愈）
+# ---------------------------------------------------------------------------
+
+
+class _FlakySource:
+    """ArrayScreenSource 装饰替身：可控失败 N 次后自愈。"""
+
+    def __init__(self, frames: list[np.ndarray], fail_times: int) -> None:
+        from rdc.capture.source import ArrayScreenSource
+
+        self._inner = ArrayScreenSource(frames)
+        self._fail = fail_times
+        self.capture_calls = 0
+
+    def capture(self):  # noqa: ANN201 - 转发内层帧类型
+        self.capture_calls += 1
+        if self.capture_calls <= self._fail:
+            from rdc.exceptions import ScreenCaptureError
+
+            raise ScreenCaptureError("屏幕采集失败: BitBlt failed")
+        return self._inner.capture()
+
+    def __getattr__(self, name: str):  # noqa: ANN201 - 协议其余成员透传
+        return getattr(self._inner, name)
+
+
+class TestCaptureBackoffAndStall:
+    async def test_capture_failure_returns_backoff_idle_not_crash(self) -> None:
+        """病灶：ScreenCaptureError 直接炸 run() task（pipeline 永久停）。"""
+        from rdc.capture.framerate import FrameAction
+
+        frames = make_source_frames(2)
+        src = _FlakySource(frames, fail_times=1)
+        pipe = ScreenPipeline(
+            src,  # type: ignore[arg-type]
+            encoder_factory=lambda w_, h_: RecordingEncoder(),
+            broadcaster=RecordingBroadcaster(),  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+        )
+        d1 = await pipe.run_once()
+        assert d1 is not None
+        assert d1.action == FrameAction.IDLE
+        assert d1.reason == "capture_failed"
+        assert d1.delay_s == 0.25  # 首次退避
+        d2 = await pipe.run_once()  # 自愈出帧
+        assert d2 is not None and d2.should_capture
+        pipe.close()
+
+    async def test_backoff_doubles_and_caps(self) -> None:
+        frames = make_source_frames(2)
+        src = _FlakySource(frames, fail_times=4)
+        pipe = ScreenPipeline(
+            src,  # type: ignore[arg-type]
+            encoder_factory=lambda w_, h_: RecordingEncoder(),
+            broadcaster=RecordingBroadcaster(),  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+        )
+        delays = [(await pipe.run_once()).delay_s for _ in range(4)]
+        assert delays == [0.25, 0.5, 1.0, 2.0]  # 指数翻倍，封顶 2s
+        pipe.close()
+
+    async def test_stall_hook_fires_once_on_threshold_and_on_recovery(self) -> None:
+        # 10 帧互异序列：失败期间内层源被调用的那几次（成功路径）不会耗尽序列，
+        # 避免差分对同帧判 IDLE 误触发"恢复"边沿。
+        frames = make_source_frames(10)
+        src = _FlakySource(frames, fail_times=5)
+        events: list[tuple[bool, str]] = []
+        pipe = ScreenPipeline(
+            src,  # type: ignore[arg-type]
+            encoder_factory=lambda w_, h_: RecordingEncoder(),
+            broadcaster=RecordingBroadcaster(),  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+            capture_stall_hook=lambda stalled, detail: events.append((stalled, detail)),
+        )
+        for _ in range(3):
+            await pipe.run_once()
+        # 第 3 次连续失败恰好触发一次停滞
+        assert events == [(True, "屏幕采集失败: BitBlt failed")]
+        for _ in range(2):
+            await pipe.run_once()  # 第 4/5 次失败：不重复触发停滞边沿
+        assert len(events) == 1
+        src._fail = 0  # 自愈
+        await pipe.run_once()
+        assert events[-1] == (False, "")  # 恢复通知一次
+        pipe.close()
+
+    async def test_stall_hook_runs_on_event_loop_thread(self) -> None:
+        """红线：回调必须来自事件循环线程，不是 executor worker 线程。"""
+        import threading
+
+        loop_tid = threading.get_ident()
+        seen: list[bool] = []
+        frames = make_source_frames(2)
+        src = _FlakySource(frames, fail_times=3)
+
+        def _hook(stalled: bool, detail: str) -> None:
+            seen.append(threading.get_ident() == loop_tid)
+
+        pipe = ScreenPipeline(
+            src,  # type: ignore[arg-type]
+            encoder_factory=lambda w_, h_: RecordingEncoder(),
+            broadcaster=RecordingBroadcaster(),  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+            capture_stall_hook=_hook,
+        )
+        for _ in range(3):
+            await pipe.run_once()
+        assert seen == [True]
+        pipe.close()

@@ -41,6 +41,7 @@ import numpy.typing as npt
 from rdc.capture.monitor import (
     VIRTUAL_SCREEN_INDEX,
     MonitorInfo,
+    MonitorNotFoundError,
     MonitorSelector,
 )
 from rdc.capture.source import BGRA_CHANNELS, CaptureFrame, FrameStats, bgra_view
@@ -269,11 +270,23 @@ class MssScreenSource:
         )
 
     def _grab_bgra(self, info: MonitorInfo) -> npt.NDArray[np.uint8]:
-        """grab 指定区域并零拷贝包装成 ``(H, W, 4)`` uint8 视图。
+        """grab 指定区域并零拷贝包装成 ``(H, W, 4)`` 视图。
+
+        句柄失效自愈（走查第六批 P0）：Windows 安全桌面切换（UAC 提权）后
+        GDI 句柄对后续 ``grab`` 永久失效（BitBlt 持续失败），mss 官方推荐
+        的恢复方式是 close + 重建 ``MSS()``。本实现把重建挂在失败路径上：
+
+        - grab 抛错 → 递增失败计数 → 尽力重建新句柄（保留当前选屏索引）；
+        - 重建失败 → ``self._mss=None``，下一次采集在入口重试重建（自愈）；
+        - 无论重建成败，**本帧**一律抛 :class:`ScreenCaptureError`（硬约束 ③），
+          由上层 pipeline 退避，恢复后自动用新句柄出帧。
 
         Raises:
-            ScreenCaptureError: grab 失败或回传字节数与尺寸不符。
+            ScreenCaptureError: 句柄不可用且重建失败，或 grab 失败/尺寸不符。
         """
+        if self._mss is None:
+            # 上次重建失败的自愈重试；成功则继续本帧采集
+            self._rebuild_backend()
         if self._mss is None:
             raise ScreenCaptureError("mss 句柄不可用")
         region = {
@@ -290,7 +303,40 @@ class MssScreenSource:
         except Exception as exc:
             self._failed += 1
             _LOG.error("屏幕采集失败", error=str(exc), monitor=info.index)
+            self._rebuild_backend()
             raise ScreenCaptureError(f"屏幕采集失败: {exc}") from exc
+
+    def _rebuild_backend(self) -> None:
+        """close 旧句柄并重建 ``MSS()``（句柄失效自愈，走查第六批 P0）。
+
+        保留当前选屏索引；新后端枚举不到该屏（显示器热变）时回退默认选择。
+        重建失败**不抛错**：置空句柄、记日志，下一次采集入口继续重试——
+        采集失败方已经由调用链抛出，这里再抛会丢失原始错误上下文。
+        """
+        self._dispose_backend()
+        try:
+            # 硬约束 ①：mss.MSS()，不是已废弃的 mss.mss()
+            self._mss = mss.MSS()
+        except Exception as exc:  # noqa: BLE001 - 重建失败降级，下帧重试
+            _LOG.warning("mss 句柄重建失败（下帧重试）", error=str(exc))
+            return
+        wanted = self._selector.current_index
+        try:
+            self._selector = MonitorSelector(self._read_monitors(), initial_index=wanted)
+        except (MonitorNotFoundError, ValueError):
+            # 显示器布局已变（热插拔/该屏消失）：回退默认选择而非报错
+            try:
+                self._selector = MonitorSelector(self._read_monitors())
+            except Exception as exc:  # noqa: BLE001 - 枚举失败同样留给下帧
+                _LOG.warning("mss 重建后枚举显示器失败（下帧重试）", error=str(exc))
+                self._dispose_backend()
+                return
+        _LOG.info(
+            "mss 句柄已重建",
+            index=self._selector.current_index,
+            width=self._selector.current.width,
+            height=self._selector.current.height,
+        )
 
     def _allocate(self, shape: tuple[int, ...]) -> None:
         """按新尺寸重建持久缓冲池（``np.zeros`` 让首帧未写区域确定，便于诊断）。"""

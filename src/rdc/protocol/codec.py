@@ -161,6 +161,12 @@ def to_proto(msg: M.Message) -> _ProtoMessage:
             return pb.StreamControl(cmd=_pb_enum(pb.StreamCmd, int(msg.cmd)), config=cfg)
         case M.Heartbeat():
             return pb.Heartbeat(kind=_pb_enum(pb.HeartbeatKind, int(msg.kind)), timestamp=msg.timestamp)
+        case M.HostStatus():
+            return pb.HostStatus(
+                code=_pb_enum(pb.HostStatusCode, int(msg.code)),
+                secure_desktop=msg.secure_desktop,
+                detail=msg.detail,
+            )
         case _:
             raise ProtocolError(f"不支持的消息类型: {type(msg).__name__}")
 
@@ -290,6 +296,14 @@ def from_payload(pkt_type: int, payload: bytes) -> M.Message:
                 p = pb.Heartbeat()
                 p.ParseFromString(payload)
                 return M.Heartbeat(kind=_enum(M.HeartbeatKind, p.kind), timestamp=p.timestamp)
+            case C.PKT_TYPE_HOST_STATUS:
+                p = pb.HostStatus()
+                p.ParseFromString(payload)
+                return M.HostStatus(
+                    code=_enum(M.HostStatusCode, p.code),
+                    secure_desktop=p.secure_desktop,
+                    detail=p.detail,
+                )
             case _:
                 raise ProtocolError(f"未知载荷类型: 0x{pkt_type:02x}")
     except DecodeError as exc:
