@@ -287,6 +287,56 @@ class TestControlSession:
         finally:
             await svc.shutdown()
 
+    async def test_silent_link_idle_timeout_resets_input(self, tmp_app_dir: Path) -> None:
+        """走查第六批 Bug4：静默断网（半开链路无 FIN/RST）服务端主动判死并释放修饰键。
+
+        病灶：``_serve_control`` 旧版 ``await channel.next_message()`` 无超时——拔网线
+        时 TCP 无 FIN/RST，阻塞到操作系统 keepalive（Windows ~2 小时），``finally`` 的
+        ``_reset_input()`` 迟迟不触发 → 最后按住的 Win 在远端悬空（"按住 Win→断网→
+        按 D 触发显示桌面"）。修复加 heartbeat_timeout 读空闲上限，静默即 break →
+        finally reset。裸 ControlChannel connect 后不发心跳，天然模拟半开链路。
+        """
+        s = make_settings(tmp_app_dir, heartbeat_interval=0.1, heartbeat_timeout=0.3)
+        svc, backend = make_service(tmp_app_dir, s)
+        ch = _control(s)
+        try:
+            await svc.start()
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+            # 不发任何心跳（模拟拔线）：0.3s 空闲后服务端应主动结束会话并 reset
+            await _wait_until(
+                lambda: ("reset",) in backend.calls
+                and not svc._control_sessions,  # noqa: SLF001
+                timeout=5.0,
+            )
+        finally:
+            # 先关客户端再关停：病灶回归（无空闲超时）时服务端会话阻塞在
+            # next_message，若跳过本步 shutdown 会跟着挂死——测试必须以断言
+            # 失败收场，不许挂住套件。
+            await ch.close()
+            await svc.shutdown()
+
+    async def test_active_link_not_reset_by_idle(self, tmp_app_dir: Path) -> None:
+        """对照：持续有消息流入（周期 PING）的活会话不被空闲超时误杀、不提前 reset。"""
+        s = make_settings(tmp_app_dir, heartbeat_interval=0.1, heartbeat_timeout=0.8)
+        svc, backend = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            ch = _control(s)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+            # 每 ~0.15s 一次 PING < 0.8s 空闲上限，连续四轮：会话须存活、无 reset
+            for _ in range(4):
+                await ch.send(Heartbeat(kind=HeartbeatKind.PING, timestamp=0.0))
+                pong = await asyncio.wait_for(ch.next_message(), timeout=2)
+                assert isinstance(pong, Heartbeat) and pong.kind is HeartbeatKind.PONG
+                await asyncio.sleep(0.15)
+            assert svc._control_sessions, "活链路不应被空闲超时判死"  # noqa: SLF001
+            assert ("reset",) not in backend.calls, "活链路不应触发修饰键释放"
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
     async def test_mouse_events_reach_backend(self, tmp_app_dir: Path) -> None:
         s = make_settings(tmp_app_dir)
         svc, backend = make_service(tmp_app_dir, s)

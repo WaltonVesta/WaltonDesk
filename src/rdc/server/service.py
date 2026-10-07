@@ -406,23 +406,41 @@ class HostService:
     # ================================================================== 会话：控制通道
 
     async def _serve_control(self, channel: StreamChannel) -> None:
-        """控制会话主循环：消息分发（输入执行/心跳/流控/剪贴板）直到 EOF。"""
+        """控制会话主循环：消息分发（输入执行/心跳/流控/剪贴板）直到 EOF 或空闲超时。
+
+        走查第六批 Bug4：客户端连接后每 ``heartbeat_interval`` 秒发一次心跳 PING，
+        存活链路必有消息流入。用 ``heartbeat_timeout`` 作**读空闲上限**：静默断网
+        （拔线/VM 断网，无 FIN/RST，TCP 半开）时 ``next_message()`` 会一直阻塞到
+        操作系统 TCP 超时（Windows 默认约 2 小时），期间 ``finally`` 的
+        ``_reset_input()`` 迟迟不触发 → 最后一次按住的 Win 等修饰键在远端悬空
+        （"按住 Win→断网→按 D 触发显示桌面"）。空闲超时把该窗口从 ~2 小时收敛到
+        heartbeat_timeout（默认 10s），且与客户端对服务端的判死预算对称（活客户端
+        每 3s 必发 PING，10s 静默 = 真死，不误伤正常会话）。
+        """
         assert isinstance(channel, ControlSession)  # nosec B101 -- TransportServer 按端口交付对应会话类型
         ip = channel.client_ip
         self._control_sessions.add(channel)
         self._auth.on_auth_success(ip)
         self._audit.conn_open(ip=ip, kind="control")
+        idle = self._settings.heartbeat_timeout
+        reason = "eof"
         try:
             while True:
-                msg = await channel.next_message()
+                try:
+                    msg = await asyncio.wait_for(channel.next_message(), timeout=idle)
+                except TimeoutError:  # 静默断网：链路半开但无消息 → 判死退出
+                    reason = "idle_timeout"
+                    break
                 if msg is None:
                     break
                 await self._dispatch_control(channel, msg)
                 self._audit.maybe_flush()
         finally:
             self._control_sessions.discard(channel)
-            self._audit.conn_close(ip=ip, kind="control", reason="eof")
+            self._audit.conn_close(ip=ip, kind="control", reason=reason)
             # 断连兜底：释放记账中的按键/鼠标键（v4 卡键病灶，D37 对面）。
+            # 走查第六批 Bug4：正常 EOF 与空闲超时两条退出路径都经此释放，
+            # 静默断网不再滞留修饰键（旧版仅靠 finally，半开时永不触发）。
             self._reset_input()
 
     async def _dispatch_control(self, channel: ControlSession, msg: Message) -> None:
