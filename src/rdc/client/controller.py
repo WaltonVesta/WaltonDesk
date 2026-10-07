@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from rdc.config.settings import Settings, current_settings
-from rdc.exceptions import AuthError, ConnectionError, TlsError
+from rdc.exceptions import AuthCancelledError, AuthError, ConnectionError, TlsError
 from rdc.input.base import MouseButton as InputMouseButton
 from rdc.input.base import normalize_key_name
 from rdc.input.coalesce import InputCoalescer, InputEvent, InputKind, WheelDirection
@@ -332,7 +332,8 @@ class ClientController:
             ``await _resolve(provider())`` 消费）。
 
         Raises:
-            AuthError: 用户取消（回调返回 ``None``）。
+            AuthCancelledError: 用户取消（回调返回 ``None``；AuthError 子类，
+                认证类终止语义不变）。
         """
         if self._password_holder is None:
             value = self._get_password(host)
@@ -340,7 +341,7 @@ class ClientController:
                 value = await value
             if value is None:
                 self._user_disconnect = True  # 取消 = 放弃本次连接，不进重连环
-                raise AuthError("用户取消口令输入")
+                raise AuthCancelledError("用户取消口令输入")
             self._password_holder = [str(value)]
         return self._password_holder[0]
 

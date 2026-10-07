@@ -65,6 +65,16 @@ class AuthError(RemoteDesktopError):
     pass
 
 
+class AuthCancelledError(AuthError):
+    """用户在口令/确认环节主动取消（阶段 9 走查第四批缺陷 1）。
+
+    继承 :class:`AuthError`——语义上仍属"认证类失败、绝不重连重试"（缺陷 3
+    口径）；单列子类供 UI 区分"用户放弃"（静默未连接）与"认证被拒"（红字
+    展示原因），避免把主动取消误报成认证失败。
+    """
+    pass
+
+
 class BlacklistError(RemoteDesktopError):
     """IP黑名单错误"""
     pass

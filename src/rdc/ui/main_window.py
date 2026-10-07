@@ -34,6 +34,7 @@ from rdc.config.settings import (
     save_settings,
     set_current,
 )
+from rdc.exceptions import AuthCancelledError, AuthError, TlsError
 from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.clipboard_sync import ClipboardSync
@@ -333,13 +334,30 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001 - 边界：网络失败展示并走重连策略
             _LOG.warning("connect_failed", host=host, error=repr(exc))
-            self._handle_connect_failure(host)
+            self._handle_connect_failure(host, exc)
             return
         self._on_connect_success(host)
 
-    def _handle_connect_failure(self, host: str) -> None:
-        """失败后决策：auto_reconnect 开启 → RECONNECTING（controller 内部重试），
-        否则 DISCONNECTED。"""
+    def _handle_connect_failure(self, host: str, exc: Exception | None = None) -> None:
+        """失败分派（第四批缺陷 1/3 口径）：
+
+        - 用户取消口令（AuthCancelledError）→ DISCONNECTED，中性"已取消连接"
+          （主动放弃不报"认证失败"，避免误导）；
+        - 认证/TLS 被拒（AuthError/TlsError）→ controller 已不重连（缺陷 3），
+          UI 直接落定 DISCONNECTED 并用红字展示具体原因（如"口令校验失败"）；
+        - 其余（网络类）→ 沿用 auto_reconnect 策略：开 → RECONNECTING
+          （controller 内部重试），关 → DISCONNECTED 泛化错误文本。
+        """
+        if isinstance(exc, AuthCancelledError):
+            self._set_state(ConnectionState.DISCONNECTED)
+            self.status_bar.set_status("已取消连接", "disconnected")
+            self.toolbar.set_host_editable(True)
+            return
+        if isinstance(exc, (AuthError, TlsError)):
+            self._set_state(ConnectionState.DISCONNECTED)
+            self.status_bar.set_status(str(exc) or "认证失败", "error")
+            self.toolbar.set_host_editable(True)
+            return
         if self._settings.auto_reconnect:
             self._set_state(ConnectionState.RECONNECTING)
         else:

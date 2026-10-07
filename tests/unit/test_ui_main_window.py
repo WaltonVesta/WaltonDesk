@@ -125,3 +125,57 @@ class TestMainWindowInteractions:
         w.frame_arrived(QImage(50, 40, QImage.Format.Format_RGB32))
         w.screen_view.clear_frame()
         assert w.screen_view._item.pixmap().isNull()  # noqa: SLF001
+
+    # -- 第四批缺陷 1 哨兵：认证失败必须给出明确用户可读提示 ------------------
+
+    def test_auth_failure_shows_reason_even_with_auto_reconnect(
+        self, qapp, qtbot
+    ) -> None:
+        """错口令：auto_reconnect 开启也不得吞掉原因（缺陷 1）。
+
+        病灶（修复前）：_handle_connect_failure 只看 auto_reconnect，认证失败
+        被归入 RECONNECTING，用户只见状态流转、看不到"口令错误"。
+        """
+        from rdc.exceptions import AuthError
+
+        class AuthFailController(FakeController):
+            async def connect(self, host, port, *, get_password, confirm_fingerprint):  # noqa: ANN001
+                self.connect_calls.append((host, port))
+                raise AuthError("认证失败: 口令校验失败")
+
+        c = AuthFailController()
+        w, _ = self._win(qtbot, ctrl=c, settings=Settings(auto_reconnect=True))
+        w.toolbar._host.setCurrentText("1.2.3.4")  # noqa: SLF001
+
+        async def _main() -> None:
+            w.toolbar._connect_btn.click()  # noqa: SLF001
+            await asyncio.sleep(0.3)
+
+        drive(qapp, _main)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert w.state == ConnectionState.DISCONNECTED
+        assert "口令校验失败" in text, text
+        assert w.toolbar._host.isEnabled()  # noqa: SLF001 - 解锁可改口令重连
+
+    def test_password_cancel_shows_neutral_cancel_not_error(self, qapp, qtbot) -> None:
+        """用户主动取消口令：中性"已取消连接"，不得误报认证失败（缺陷 1）。"""
+        from rdc.exceptions import AuthCancelledError
+
+        class CancelController(FakeController):
+            async def connect(self, host, port, *, get_password, confirm_fingerprint):  # noqa: ANN001
+                self.connect_calls.append((host, port))
+                raise AuthCancelledError("用户取消口令输入")
+
+        c = CancelController()
+        w, _ = self._win(qtbot, ctrl=c, settings=Settings(auto_reconnect=True))
+        w.toolbar._host.setCurrentText("1.2.3.4")  # noqa: SLF001
+
+        async def _main() -> None:
+            w.toolbar._connect_btn.click()  # noqa: SLF001
+            await asyncio.sleep(0.3)
+
+        drive(qapp, _main)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert w.state == ConnectionState.DISCONNECTED
+        assert "取消" in text and "失败" not in text, text
+        assert w.toolbar._host.isEnabled()  # noqa: SLF001
