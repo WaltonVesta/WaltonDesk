@@ -312,13 +312,104 @@ class TestKeyboard:
         backend.key_press(";")
         assert rec.all_items[0]["wVk"] == _VK_OEM_1
 
-    def test_shift_requiring_char_rejected(
+    def test_shift_requiring_char_resolves_base_key(
         self, backend: WindowsBackend, rec: Recorder
     ) -> None:
-        """:' 需 Shift 组合 → 拒绝并指向 type_text（不自动按 Shift，避免
-        与被控端布局耦合）。"""
-        with pytest.raises(InputControlError, match="请用 type_text"):
-            backend.key_press(":")
+        """:' 需 Shift（scan=0x01BA）→ 注入**基键** OEM_1（走查第六批 Bug2）。
+
+        物理键模型：用户的 Shift 是独立的 ``shift`` 键事件先行注入，远端已持有
+        修饰态，这里只补基键即由远端合成 ':'。旧版对 scan>0xFF 一律拒绝（指向
+        type_text），导致标点符号键全部无法注入。
+        """
+        backend.key_press(":")
+        item = rec.all_items[0]
+        assert item["wVk"] == _VK_OEM_1  # 低字节基键，非整段 0x01BA
+        assert item["flags"] == 0  # 不叠加任何修饰标志
+
+    @pytest.mark.parametrize(
+        ("ch", "expect_vk"),
+        [
+            # 数字行移位符号（scan 高字节 = shift 状态）
+            ("!", 0x31),
+            ("@", 0x32),
+            ("#", 0x33),
+            ("$", 0x34),
+            ("%", 0x35),
+            ("^", 0x36),
+            ("&", 0x37),
+            ("*", 0x38),
+            ("(", 0x39),
+            (")", 0x30),
+            # 编辑区符号（含未移位/移位两档）
+            ("-", 0xBD),
+            ("_", 0xBD),
+            ("=", 0xBB),
+            ("+", 0xBB),
+            ("[", 0xDB),
+            ("{", 0xDB),
+            ("]", 0xDD),
+            ("}", 0xDD),
+            ("\\", 0xDC),
+            ("|", 0xDC),
+            (";", 0xBA),
+            (":", 0xBA),
+            ("'", 0xDE),
+            ('"', 0xDE),
+            (",", 0xBC),
+            ("<", 0xBC),
+            (".", 0xBE),
+            (">", 0xBE),
+            ("/", 0xBF),
+            ("?", 0xBF),
+            ("`", 0xC0),
+            ("~", 0xC0),
+        ],
+    )
+    def test_all_punctuation_resolves_to_base_vk(self, ch: str, expect_vk: int) -> None:
+        """走查第六批 Bug2 全量哨兵：用户报的每个标点都能解析到基键 VK。
+
+        用完整美式布局 VkKeyScanW 替身（探针实测真机返回值）。病灶：旧
+        ``_resolve_key`` 对 scan>0xFF 抛"请用 type_text" → !@# 等 27 个移位
+        符号全部注入失败；且旧 ``_VkKeyScanW`` 未声明 restype，未移位 ;,.
+        等读到高位垃圾也被误拒。修复后一律取 ``scan & 0xFF`` 基键，远端
+        shift 态由独立的 shift 物理键事件维持。
+        """
+        full_scan = {
+            "!": 0x0131, "@": 0x0132, "#": 0x0133, "$": 0x0134, "%": 0x0135,
+            "^": 0x0136, "&": 0x0137, "*": 0x0138, "(": 0x0139, ")": 0x0130,
+            "-": 0x00BD, "_": 0x01BD, "=": 0x00BB, "+": 0x01BB,
+            "[": 0x00DB, "{": 0x01DB, "]": 0x00DD, "}": 0x01DD,
+            "\\": 0x00DC, "|": 0x01DC, ";": 0x00BA, ":": 0x01BA,
+            "'": 0x00DE, '"': 0x01DE, ",": 0x00BC, "<": 0x01BC,
+            ".": 0x00BE, ">": 0x01BE, "/": 0x00BF, "?": 0x01BF,
+            "`": 0x00C0, "~": 0x01C0,
+        }
+        rec = Recorder()
+        be = WindowsBackend(
+            send=rec, bounds=lambda: FIXED_BOUNDS, scan_char=full_scan.get
+        )
+        be.key_press(ch)
+        item = rec.all_items[0]
+        assert item["wVk"] == expect_vk, f"{ch!r} 应解析到基键 0x{expect_vk:02X}"
+        assert item["flags"] == 0
+        # 释放同样落基键（记账/ reset 口径一致）
+        rec.reset()
+        be.key_release(ch)
+        assert rec.all_items[0]["wVk"] == expect_vk
+
+    def test_vkkeyscanw_restype_declared(self) -> None:
+        """走查第六批 Bug2 根因锁定：``_VkKeyScanW.restype = c_short``。
+
+        未声明时 ctypes 按默认 c_int 读寄存器，高 16 位是垃圾 → ``; , . /`` 等
+        未移位标点（本应 scan≤0xFF 直接可用）被判成 ``scan>0xFF`` 误拒。探针实测
+        该缺失是本机"部分未移位标点也失效"的直接原因（移位符号失效则是
+        resolve 逻辑，见上条）。非 Windows 环境该符号为 None，跳过。
+        """
+        import rdc.input.windows as win_mod
+
+        if win_mod._VkKeyScanW is None:  # pragma: no cover - 非 Windows 分支
+            pytest.skip("VkKeyScanW 仅在 Windows 存在")
+        assert win_mod._VkKeyScanW.restype is ctypes.c_short
 
     def test_unmappable_char_rejected(self, backend: WindowsBackend, rec: Recorder) -> None:
         with pytest.raises(InputControlError, match="无对应 VK"):

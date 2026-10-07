@@ -273,6 +273,26 @@ class TestScreenView:
         assert keys and keys[0][1] is True
         assert all(k == Qt.Key.Key_A for k, _ in keys)
 
+    def test_click_grabs_focus_for_tab_win(self, qapp, qtbot) -> None:
+        """走查第六批 Bug2：控制态点击画面抓取键盘焦点。
+
+        病灶：点击后焦点不落本视图（落 None/工具栏），Tab 被 Qt 焦点导航
+        消费、Win 触发主控端开始菜单——用户实测"Tab/Win 泄漏"。修复后点击
+        即 setFocus，键盘事件进入 keyPressEvent 被 accept()，Tab 不再跳转。
+        """
+        v = self._shown(qtbot)
+        qtbot.addWidget(v)
+        v.present_image(QImage(100, 100, QImage.Format.Format_RGB32))
+        v.set_input_enabled(True)
+        QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        QTest.qWait(30)
+        assert QApplication.focusWidget() is v  # 病灶：焦点未抓取 → None
+        keys: list = []
+        v.keyEvent.connect(lambda k, d: keys.append((k, d)))
+        QTest.keyClick(v, Qt.Key.Key_Tab)
+        QTest.qWait(20)
+        assert (int(Qt.Key.Key_Tab), True) in keys  # Tab 已转发远端而非本地跳焦点
+
     def test_wheel_control_mode_emits_and_swallows(self, qapp, qtbot) -> None:
         from PySide6.QtGui import QWheelEvent
 

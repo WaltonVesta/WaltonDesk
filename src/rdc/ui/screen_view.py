@@ -201,6 +201,12 @@ class ScreenView(QGraphicsView):
         btn = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right"}.get(
             event.button(), "middle"
         )
+        if self._input_enabled:
+            # 走查第六批 Bug2：点击画面即抓取键盘焦点。此前焦点常留在
+            # 工具栏/无焦点，Tab 被 Qt 焦点导航消费、Win 触发主控端开始
+            # 菜单（"泄漏"）。焦点在本视图后，keyPressEvent 对全部按键
+            # accept()，事件不再外溢。
+            self.setFocus()
         self._emit(f"press:{btn}", event.position().toPoint())
         super().mousePressEvent(event)
 

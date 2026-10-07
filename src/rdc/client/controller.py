@@ -279,7 +279,9 @@ class ClientController:
             return
         name = _qt_key_to_name(qt_key)
         if name is None:
-            _LOG.debug("send_key_unmapped_qt_code", qt_key=qt_key)
+            # 走查第六批 Bug2：未映射键不静默吞掉——提级 warning 便于定位
+            # 键盘链路断点（哪些物理键没进值表）。
+            _LOG.warning("send_key_unmapped_qt_code", qt_key=qt_key)
             return
         self._emit_batches(self._coalescer.feed_key(name, press))
 

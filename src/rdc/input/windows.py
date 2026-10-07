@@ -147,6 +147,9 @@ if sys.platform == "win32":  # pragma: no cover - 非 Windows 分支由 CI 矩�
     _SendInput = _user32.SendInput
     _GetSystemMetrics = _user32.GetSystemMetrics
     _VkKeyScanW = _user32.VkKeyScanW
+    # SHORT 返回值必须声明 c_short：默认 c_int 会把寄存器高 16 位垃圾读进来，
+    # 污染 scan 判定（走查第六批 Bug2：真实布局下标点全被误判"需 Shift 组合"）。
+    _VkKeyScanW.restype = ctypes.c_short
 else:  # pragma: no cover
     _SendInput = None
     _GetSystemMetrics = None
@@ -405,8 +408,15 @@ class WindowsBackend:
         """键名 → ``(wVk, 按下基础 flags)``。
 
         表内键直接映射；单字符 a-z/0-9 用自身 ASCII VK；其余单字符经
-        ``scan_char``（VkKeyScanW）——需 Shift 组合或无映射的字符**拒绝**，
-        大小写与符号文本一律走 :meth:`type_text`。
+        ``scan_char``（VkKeyScanW）取**基键 VK**。
+
+        走查第六批 Bug2 修正：``VkKeyScanW`` 返回值的低字节是基键 VK、高字节
+        是 shift/ctrl/alt 状态位。本架构按键是**物理键模型**——用户按 Shift 会
+        作为独立的 ``shift`` 键事件先行注入，远端此刻已持有该修饰键状态，因此
+        这里只需注入基键（如 ``':'``→OEM_1、``'!'``→1），远端 OS 自然合成上档
+        字符。旧版把 ``scan>0xFF`` 一律拒绝（"请用 type_text"），导致**标点
+        符号全部无法注入**（用户实测：! @ # : 等无效）；且彼时 ``_VkKeyScanW``
+        未声明 ``restype=c_short``，未移位的 ``; , . /`` 等也读到高位垃圾被误拒。
         """
         normalized = normalize_key_name(key)  # 空串在这里抛 InputControlError
         vk = _VK_TABLE.get(normalized)
@@ -417,12 +427,9 @@ class WindowsBackend:
             if "a" <= normalized <= "z" or "0" <= normalized <= "9":
                 return ord(normalized.upper()), 0
             scan = self._scan_char(normalized)
-            if scan == -1:
+            if scan < 0:
                 raise InputControlError(f"键 {key!r} 在当前键盘布局无对应 VK")
-            if scan > 0xFF:
-                raise InputControlError(
-                    f"键 {key!r} 需 Shift 组合；此类字符请用 type_text 注入"
-                )
+            # 低字节基键 VK；高字节修饰状态由独立按键事件在远端维持，此处不叠加
             return scan & 0xFF, 0
         raise InputControlError(f"无法解析键名 {key!r}")
 
