@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from rdc.exceptions import AuthError
+from rdc.exceptions import AuthBannedError, AuthError
 from rdc.protocol.messages import AuthRequest, AuthResponse, Heartbeat, HeartbeatKind, ScreenJoin
 from rdc.secrets.password import hash_password
 from rdc.transport.handshake import (
@@ -148,6 +148,36 @@ class TestControlHandshake:
         with pytest.raises(AuthError, match="缺少"):
             await c_task
         await s_task
+
+    async def test_banned_response_raises_auth_banned_with_minutes(self) -> None:
+        """缺陷 2 握手层哨兵：ok=False+banned=True → AuthBannedError，
+        携带剩余秒且文案按分钟折算（≥60 秒）。"""
+        client, server, cw, sw = make_stream_pair()
+
+        async def fake_server() -> None:
+            req = await server.recv_message()
+            assert isinstance(req, AuthRequest)
+            await server.send_message(
+                AuthResponse(
+                    ok=False, reason="banned", banned=True, ban_remaining_seconds=300
+                )
+            )
+
+        c_task = asyncio.create_task(perform_control_handshake(client, password="x"))
+        s_task = asyncio.create_task(fake_server())
+        await run_handshake_pair(c_task, s_task, cw, sw, client, server)
+        with pytest.raises(AuthBannedError) as ei:
+            await c_task
+        assert ei.value.remaining_seconds == 300
+        assert "5 分钟" in str(ei.value)
+        # 封禁异常仍是 AuthError 子类：调用方按认证类失败统一处理（缺陷 3 面）
+        assert isinstance(ei.value, AuthError)
+        await s_task
+
+    async def test_banned_seconds_under_minute_shows_seconds(self) -> None:
+        """不足 60 秒按秒文案（措辞分支）。"""
+        assert "秒" in AuthBannedError.format_message(45)
+        assert "分钟" not in AuthBannedError.format_message(59)
 
     async def test_server_eof_during_handshake(self) -> None:
         client, server, _, _ = make_stream_pair()

@@ -169,6 +169,11 @@ class AuthResponse:
 
     ``server_nonce`` / ``connection_id``：F1 方案 B 的服务端 nonce 与连接标识
     （HKDF salt），均 32B 随机、每连接一次。
+
+    ``banned`` / ``ban_remaining_seconds``（走查第四批缺陷 2）：仅当 ``ok=False``
+    且服务端因"封禁"拒绝时 ``banned=True`` 并携带剩余秒数（向上取整），客户端
+    据此在弹口令框前提示"已被封禁，剩余 N 秒"。其余拒绝原因 ``banned=False``、
+    ``ban_remaining_seconds=0``（不泄露拒绝类别）。
     """
 
     ok: bool
@@ -177,10 +182,18 @@ class AuthResponse:
     protocol_version: int = C.PROTOCOL_VERSION
     server_nonce: bytes = b""
     connection_id: bytes = b""
+    banned: bool = False
+    ban_remaining_seconds: int = 0
 
     def __post_init__(self) -> None:
         _check_nonce(self.server_nonce, "server_nonce")
         _check_nonce(self.connection_id, "connection_id")
+        if self.ban_remaining_seconds < 0:
+            raise ProtocolError(
+                f"ban_remaining_seconds 不得为负，实际 {self.ban_remaining_seconds}"
+            )
+        if self.ok and self.banned:
+            raise ProtocolError("认证成功响应不应置 banned=True")
 
     @property
     def payload_type(self) -> PayloadType:

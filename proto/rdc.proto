@@ -57,6 +57,11 @@ message AuthResponse {
   bytes server_nonce = 5;
   // F1 方案 B：连接标识（HKDF salt，服务端每连接随机生成）
   bytes connection_id = 6;
+  // 走查第四批缺陷 2：ok=false 且因"封禁"拒绝时置真（其余拒绝原因=false）。
+  // 客户端据此在弹口令框前/失败提示里显示"已被封禁，剩余 N 秒"。
+  bool banned = 7;
+  // 封禁剩余秒数（向上取整；banned=false 时无意义，恒 0）
+  uint32 ban_remaining_seconds = 8;
 }
 
 // 画面通道加入（C→S）：凭控制通道发放的一次性令牌 + 独立 nonce 建立第二连接

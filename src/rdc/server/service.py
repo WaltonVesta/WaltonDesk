@@ -193,6 +193,7 @@ class HostService:
                 on_screen_session=self._serve_screen,
                 check_client=self._auth.check_client,
                 on_auth_failed=self._on_auth_failed_hook,
+                ban_query=self._auth.ban_remaining_seconds,
             )
             await self._server.start()
         except (OSError, TlsError) as exc:

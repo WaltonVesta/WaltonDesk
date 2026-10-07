@@ -115,6 +115,8 @@ def to_proto(msg: M.Message) -> _ProtoMessage:
                 protocol_version=msg.protocol_version,
                 server_nonce=msg.server_nonce,
                 connection_id=msg.connection_id,
+                banned=msg.banned,
+                ban_remaining_seconds=msg.ban_remaining_seconds,
             )
         case M.ScreenJoin():
             return pb.ScreenJoin(
@@ -236,6 +238,8 @@ def from_payload(pkt_type: int, payload: bytes) -> M.Message:
                     protocol_version=p.protocol_version,
                     server_nonce=p.server_nonce,
                     connection_id=p.connection_id,
+                    banned=p.banned,
+                    ban_remaining_seconds=p.ban_remaining_seconds,
                 )
             case C.PKT_TYPE_SESSION_JOIN:
                 p = pb.ScreenJoin()

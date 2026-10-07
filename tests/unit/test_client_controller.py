@@ -19,7 +19,7 @@ from PIL import Image
 
 from rdc.client import controller as cc
 from rdc.config.settings import Settings
-from rdc.exceptions import AuthError, ConnectionError
+from rdc.exceptions import AuthBannedError, AuthError, ConnectionError
 from rdc.input.coalesce import InputCoalescer
 from rdc.protocol.messages import (
     ClipboardEvent,
@@ -286,6 +286,80 @@ class TestStateMachine:
         assert "reconnect_auth_class_abort" in joined
         assert "reconnect_success" not in joined
         assert "reconnect_exhausted_giveup" not in joined
+
+
+class TestBanCache:
+    """走查第四批缺陷 2：服务端 banned 响应缓存 + 弹框前本地拦截。"""
+
+    async def test_first_ban_response_cached(self) -> None:
+        clk = FakeClock()
+        ctl, _ = make_ctrl(clock=clk)
+        FakeControl.connect_error = AuthBannedError(
+            AuthBannedError.format_message(300), remaining_seconds=300
+        )
+        with pytest.raises(AuthBannedError):
+            await connect_ok(ctl)
+        assert ctl._ban_host == "10.0.0.9"  # noqa: SLF001
+        assert ctl._ban_until == clk.now + 300  # noqa: SLF001
+        assert ctl.state == "disconnected"
+
+    async def test_second_connect_blocked_before_prompt(self) -> None:
+        """缓存未过期：二次 connect 不建通道、不弹口令框，直接抛 AuthBannedError。"""
+        clk = FakeClock()
+        ctl, _ = make_ctrl(clock=clk)
+        FakeControl.connect_error = AuthBannedError(
+            AuthBannedError.format_message(300), remaining_seconds=300
+        )
+        with pytest.raises(AuthBannedError):
+            await connect_ok(ctl)
+        built = len(FakeControl.instances)
+        prompts: list[str] = []
+
+        async def get_pw(h: str) -> str:
+            prompts.append(h)
+            return "pw"
+
+        with pytest.raises(AuthBannedError) as ei:
+            await ctl.connect(
+                "10.0.0.9", 9998, get_password=get_pw, confirm_fingerprint=lambda fp, h: True
+            )
+        assert prompts == []  # 弹框前即拦截
+        assert len(FakeControl.instances) == built  # 未再发网络包
+        assert "分钟" in str(ei.value)
+
+    async def test_other_host_not_blocked(self) -> None:
+        """缓存按主机比对：换主机正常发起（FakeControl 已恢复成功路径）。"""
+        clk = FakeClock()
+        ctl, _ = make_ctrl(clock=clk)
+        FakeControl.connect_error = AuthBannedError(
+            AuthBannedError.format_message(300), remaining_seconds=300
+        )
+        with pytest.raises(AuthBannedError):
+            await connect_ok(ctl)
+        FakeControl.connect_error = None
+        built = len(FakeControl.instances)
+        await ctl.connect(
+            "10.0.0.8",
+            9998,
+            get_password=lambda h: "pw",
+            confirm_fingerprint=lambda fp, h: True,
+        )
+        assert len(FakeControl.instances) == built + 1
+        assert ctl.state == "connected"
+
+    async def test_cache_expires_then_connects(self) -> None:
+        """假时钟推进越过封禁期 → 预检放行，正常发起连接。"""
+        clk = FakeClock()
+        ctl, _ = make_ctrl(clock=clk)
+        FakeControl.connect_error = AuthBannedError(
+            AuthBannedError.format_message(300), remaining_seconds=300
+        )
+        with pytest.raises(AuthBannedError):
+            await connect_ok(ctl)
+        FakeControl.connect_error = None
+        clk.advance(301)
+        await connect_ok(ctl)
+        assert ctl.state == "connected"
 
     async def test_reconnect_guard_when_no_running_loop(
         self, monkeypatch: pytest.MonkeyPatch

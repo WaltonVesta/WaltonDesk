@@ -133,6 +133,15 @@ class HostAuth:
             return False
         return True
 
+    def ban_remaining_seconds(self, ip: str) -> float:
+        """封禁剩余秒（走查第四批缺陷 2）：供传输层准入拒绝时判定。
+
+        命中封禁返回 >0（传输层据此回一帧 ``banned`` 认证响应）；非封禁类
+        拒绝（黑白名单、限流）或未封禁返回 0.0（传输层维持握手前裸关，
+        不泄露拒绝类别）。委托 :meth:`Banlist.remaining_seconds`。
+        """
+        return self._banlist.remaining_seconds(ip)
+
     # ------------------------------------------------------------------ 认证结果接线
 
     def on_auth_success(self, ip: str) -> None:

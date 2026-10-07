@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from rdc.exceptions import AuthError
+from rdc.exceptions import AuthBannedError, AuthError
 from rdc.secrets.password import hash_password
 from rdc.security import fingerprint as fp_mod
 from rdc.transport.control_channel import ControlChannel
@@ -199,5 +199,52 @@ class TestOnAuthFailed:
             await asyncio.sleep(1.5)
             writer.close()
             assert events == []
+        finally:
+            await server.stop()
+
+
+class TestBanNotice:
+    """缺陷 2 哨兵：准入拒绝命中封禁时回一帧 banned 认证响应。"""
+
+    async def test_banned_ip_gets_notice_with_remaining(self, certs) -> None:
+        server, ctrl_port, _ = await _run_server(
+            certs,
+            check_client=lambda ip: False,
+            ban_query=lambda ip: 121.0,  # 命中封禁，剩 121 秒
+        )
+        try:
+            ch = _control(ctrl_port, "whatever")
+            with pytest.raises(AuthBannedError) as ei:
+                await asyncio.wait_for(ch.connect(), timeout=5)
+            assert ei.value.remaining_seconds == 121
+            await ch.close()
+        finally:
+            await server.stop()
+
+    async def test_non_ban_rejection_stays_silent(self, certs) -> None:
+        """ban_query 返回 0（黑白名单/限流类拒绝）→ 裸关，不发任何响应帧。"""
+        server, ctrl_port, _ = await _run_server(
+            certs,
+            check_client=lambda ip: False,
+            ban_query=lambda ip: 0.0,
+        )
+        try:
+            ch = _control(ctrl_port, "whatever")
+            with pytest.raises((AuthError, OSError)) as ei:
+                await asyncio.wait_for(ch.connect(), timeout=5)
+            assert not isinstance(ei.value, AuthBannedError)
+            await ch.close()
+        finally:
+            await server.stop()
+
+    async def test_unwired_baseline_kept(self, certs) -> None:
+        """未接线 ban_query（既有全部装配/测试路径）→ 拒绝语义与基线一致。"""
+        server, ctrl_port, _ = await _run_server(certs, check_client=lambda ip: False)
+        try:
+            ch = _control(ctrl_port, "whatever")
+            with pytest.raises((AuthError, OSError)) as ei:
+                await asyncio.wait_for(ch.connect(), timeout=5)
+            assert not isinstance(ei.value, AuthBannedError)
+            await ch.close()
         finally:
             await server.stop()

@@ -75,6 +75,29 @@ class AuthCancelledError(AuthError):
     pass
 
 
+class AuthBannedError(AuthError):
+    """服务端处于封禁期拒绝认证（阶段 9 走查第四批缺陷 2）。
+
+    ``remaining_seconds``：封禁剩余秒数（服务端向上取整回传）。客户端
+    收到后缓存到期时刻，之后的连接尝试在弹口令框**前**即被拒绝，
+    不再白输口令。继承 :class:`AuthError`——认证类失败绝不重连（缺陷 3）
+    与 UI 红字展示（缺陷 1）语义天然保持。
+    """
+
+    def __init__(self, message: str, *, remaining_seconds: int = 0) -> None:
+        super().__init__(message)
+        self.remaining_seconds = remaining_seconds
+
+    @staticmethod
+    def format_message(remaining_seconds: float) -> str:
+        """用户可读封禁文案：≥60 秒折算分钟（向上取整），否则按秒。"""
+        secs = max(0, int(remaining_seconds))
+        if secs >= 60:
+            minutes = -(-secs // 60)  # 向上取整：300s→5分钟、181s→4分钟
+            return f"已被服务端封禁，请约 {minutes} 分钟后重试"
+        return f"已被服务端封禁，请约 {secs} 秒后重试"
+
+
 class BlacklistError(RemoteDesktopError):
     """IP黑名单错误"""
     pass

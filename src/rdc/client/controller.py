@@ -47,10 +47,17 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from math import ceil
 from typing import Any, Final
 
 from rdc.config.settings import Settings, current_settings
-from rdc.exceptions import AuthCancelledError, AuthError, ConnectionError, TlsError
+from rdc.exceptions import (
+    AuthBannedError,
+    AuthCancelledError,
+    AuthError,
+    ConnectionError,
+    TlsError,
+)
 from rdc.input.base import MouseButton as InputMouseButton
 from rdc.input.base import normalize_key_name
 from rdc.input.coalesce import InputCoalescer, InputEvent, InputKind, WheelDirection
@@ -165,6 +172,10 @@ class ClientController:
         self._total_frames = 0
         self._last_latency_ms: float | None = None
         self._resolution: tuple[int, int] | None = None
+        # 封禁缓存（走查第四批缺陷 2）：服务端 banned 响应的本地到期时刻。
+        # 命中后 connect 在弹口令框**前**即拒绝，用户不再白输口令。
+        self._ban_until = 0.0
+        self._ban_host = ""
 
     # ================================================================== UI 契约
 
@@ -200,7 +211,14 @@ class ClientController:
         - 网络类失败（OSError 等）且 ``auto_reconnect`` → 进入重连环
           （状态 ``reconnecting``，指数退避；环内认证/TLS 类失败同样终止）；
         - 未开自动重连 → ``disconnected`` + 异常上抛。
+
+        封禁缓存（走查第四批缺陷 2）：上次握手收到 ``banned`` 响应即缓存
+        到期时刻；本主机仍在封禁期内时，connect **不发网络包、不弹口令框**，
+        直接抛 :class:`AuthBannedError`（剩余时长按本地时钟折算）。
         """
+        if host == self._ban_host and self._clock() < self._ban_until:
+            self._set_state("disconnected")
+            raise self._banned_error_now()
         await self._teardown()
         self._user_disconnect = False
         self._host, self._port = host, port
@@ -210,7 +228,8 @@ class ClientController:
         self._set_state("connecting")
         try:
             await self._open_session(host, port)
-        except _AUTH_CLASS_ERRORS:
+        except _AUTH_CLASS_ERRORS as exc:
+            self._record_ban(exc)
             await self._final_disconnect()
             raise
         except BaseException:
@@ -334,7 +353,11 @@ class ClientController:
         Raises:
             AuthCancelledError: 用户取消（回调返回 ``None``；AuthError 子类，
                 认证类终止语义不变）。
+            AuthBannedError: 本地封禁缓存未过期（弹框**前**拦截；正常路径由
+                :meth:`connect` 入口预检，本处兜住重连环等旁路进入）。
         """
+        if host == self._ban_host and self._clock() < self._ban_until:
+            raise self._banned_error_now()
         if self._password_holder is None:
             value = self._get_password(host)
             if inspect.isawaitable(value):
@@ -344,6 +367,23 @@ class ClientController:
                 raise AuthCancelledError("用户取消口令输入")
             self._password_holder = [str(value)]
         return self._password_holder[0]
+
+    def _record_ban(self, exc: BaseException) -> None:
+        """握手失败异常若为封禁 → 缓存到期时刻（走查第四批缺陷 2）。
+
+        非封禁异常零副作用；旧缓存属其他主机时直接覆盖（预检带主机比对）。
+        """
+        if isinstance(exc, AuthBannedError) and exc.remaining_seconds > 0:
+            self._ban_until = self._clock() + exc.remaining_seconds
+            self._ban_host = self._host or ""
+            _LOG.info(
+                "server_ban_cached", host=self._ban_host, remaining_s=exc.remaining_seconds
+            )
+
+    def _banned_error_now(self) -> AuthBannedError:
+        """按本地时钟折算剩余秒，重建封禁异常（文案与首连路径同口径）。"""
+        remaining = max(0, ceil(self._ban_until - self._clock()))
+        return AuthBannedError(AuthBannedError.format_message(remaining), remaining_seconds=remaining)
 
     # ================================================================== 接收环
 
@@ -556,6 +596,7 @@ class ClientController:
             # run() 只吞 OSError/TimeoutError，此类异常在此上抛；_teardown
             # 已在 attempt 开头执行过，落定只需清口令+置态。
             _LOG.warning("reconnect_abort", error=str(exc))
+            self._record_ban(exc)
             await self._final_disconnect()
             return
         finally:

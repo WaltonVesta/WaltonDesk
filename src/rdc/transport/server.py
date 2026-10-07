@@ -22,10 +22,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from math import ceil
 from pathlib import Path
 
 from rdc.exceptions import AuthError, TlsError
 from rdc.logging import get_logger
+from rdc.protocol.messages import AuthResponse
 from rdc.transport.base import FrameStream, StreamChannel
 from rdc.transport.handshake import HANDSHAKE_TIMEOUT, serve_control_handshake, serve_screen_join
 from rdc.transport.session_token import SessionTokenStore
@@ -50,6 +52,17 @@ ClientCheck = Callable[[str], bool]
 #: TLS/网络类（连接未进入认证阶段）、握手**超时**（对端未发出任何口令尝试，
 #: 计入会污染爆破防护窗口语义）。
 AuthFailedHook = Callable[[str, str], None]
+
+#: 封禁剩余秒查询（走查第四批缺陷 2）：``fn(client_ip) -> float``，返回 >0
+#: 表示准入拒绝命中"封禁"及剩余秒数。接线且命中封禁时，控制端口拒绝**前**
+#: 回一帧 ``AuthResponse(ok=False, banned=True, ...)`` 让客户端在弹口令框外
+#: 得知被封；未接线 / 非封禁类拒绝（黑白名单、限流）维持握手前立即关流
+#: ——基线语义不变（被拒 IP 不消耗 bcrypt、限流拒绝不泄露类别信息）。
+BanQuery = Callable[[str], float]
+
+#: 封禁回帧前消费对端 AuthRequest 的读取上限（秒）：对端不发帧（连接洪水）
+#: 即超时回落静默关流，与原拒绝路径同量级。
+BAN_NOTICE_READ_TIMEOUT = 5.0
 
 
 class ControlSession(StreamChannel):
@@ -85,6 +98,10 @@ class TransportServer:
             返回 ``False`` 关流拒绝；缺省全通过）。
         on_auth_failed: 认证阶段失败通知（阶段 9 批 3 扩展，供封禁计数；
             缺省不上报）。
+        ban_query: 封禁剩余秒查询（走查第四批缺陷 2，接线可选）：仅当
+            ``check_client`` 拒绝且本回调返回 >0（命中封禁）时，控制端口
+            回一帧 ``banned`` 认证响应告知客户端；未接线维持握手前立即
+            关流基线（不消耗 bcrypt、非封禁拒绝不泄露类别）。
     """
 
     def __init__(
@@ -102,6 +119,7 @@ class TransportServer:
         on_screen_session: SessionHook | None = None,
         check_client: ClientCheck | None = None,
         on_auth_failed: AuthFailedHook | None = None,
+        ban_query: BanQuery | None = None,
     ) -> None:
         self._host = host
         self._control_port = control_port
@@ -114,6 +132,7 @@ class TransportServer:
         self._on_screen = on_screen_session
         self._check_client = check_client
         self._on_auth_failed = on_auth_failed
+        self._ban_query = ban_query
         self._servers: list[asyncio.Server] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._sessions: set[StreamChannel] = set()
@@ -190,12 +209,45 @@ class TransportServer:
 
         return client_connected
 
+    async def _reject_control(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, client_ip: str
+    ) -> None:
+        """控制端口准入拒绝出口（走查第四批缺陷 2）。
+
+        未接线 ``ban_query`` 或拒绝原因非封禁 → 维持握手前裸关基线（不消耗
+        bcrypt、不泄露拒绝类别）。命中封禁 → 握手是请求-响应式，先消费对端
+        已发出的认证请求，再回一帧 ``banned`` 响应携带剩余秒，客户端据此在
+        弹口令框外即获知封禁。洪水连接（不发请求）限时等待后静默关，
+        开销与裸关同量级。
+        """
+        remaining = self._ban_query(client_ip) if self._ban_query is not None else 0.0
+        if remaining <= 0:
+            writer.close()
+            return
+        stream = FrameStream(reader, writer, name="control-reject")
+        try:
+            got = await asyncio.wait_for(
+                stream.recv_message(), timeout=BAN_NOTICE_READ_TIMEOUT
+            )
+            if got is not None:  # 对端已发起认证，回帧可达
+                await stream.send_message(
+                    AuthResponse(
+                        ok=False,
+                        reason="banned",
+                        banned=True,
+                        ban_remaining_seconds=ceil(remaining),
+                    )
+                )
+        except (OSError, TimeoutError):  # 写失败/请求未到：静默关，等同裸关语义
+            pass
+        writer.close()
+
     async def _handle_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """控制端口：TLS 已由 asyncio 完成 → 准入 → 认证握手 → 会话交付。"""
         peer = writer.get_extra_info("peername")
         client_ip = str(peer[0]) if peer else "?"
         if not self._admit(client_ip):
-            writer.close()
+            await self._reject_control(reader, writer, client_ip)
             return
         if self._sem.locked():  # 已达并发上限：立即拒绝（v4 acquire(blocking=False) 语义）
             self._log.warning("connection_refused_limit", client=client_ip)

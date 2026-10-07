@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from rdc.exceptions import AuthError, SecretStoreError
+from rdc.exceptions import AuthBannedError, AuthError, SecretStoreError
 from rdc.logging import get_logger
 from rdc.protocol.messages import AuthRequest, AuthResponse, ScreenJoin
 from rdc.transport.base import FrameStream
@@ -108,6 +108,13 @@ async def perform_control_handshake(
     if not isinstance(resp, AuthResponse):
         raise AuthError(f"握手期望 AuthResponse，收到 {type(resp).__name__}")
     if not resp.ok:
+        if resp.banned:
+            # 文案统一由 AuthBannedError.format_message 生成（服务端 reason
+            # 为审计串，二者口径独立；封禁只在拒绝时出现）
+            raise AuthBannedError(
+                AuthBannedError.format_message(resp.ban_remaining_seconds),
+                remaining_seconds=resp.ban_remaining_seconds,
+            )
         raise AuthError(f"认证失败: {resp.reason or '未提供原因'}")
     if not resp.server_nonce or not resp.connection_id or not resp.token:
         raise AuthError("AuthResponse 缺少 nonce/connection_id/token，拒绝建立会话")
