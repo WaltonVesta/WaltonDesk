@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷（四批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1440 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略（五批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1441 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -172,7 +172,16 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **哨兵测试补齐·第四批**（9 项 + 2 UI 项）：`TestBanCache`（controller 4 项：首响应缓存/二次 connect 弹框前拦截且不建通道/换主机不误拦/假时钟过期放行）、`TestBanNotice`（服务端 3 项三态：接线命中封禁回帧含剩余秒/非封禁拒绝静默/**未接线维持裸关基线**）、`test_transport_handshake.py` 封禁分支 2 项（banned→AuthBannedError 分钟折算文案 + 子类断言）；UI 层缺陷 1 两分支各 1 项（认证被拒红字含原因/取消中性文案）在 `test_ui_main_window.py`。stash 回退行为层三文件验证：病灶上相关哨兵转红（含 `ban_query` 参数不存在、`_ban_host` 缺失、裸 AuthError 文案三种失败形态），修复后全绿。
 
-**走查其余项**：第四批修复后 1.2 画面显示（待用户确认）、1.3/1.4 重测均已解锁；封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
+**已发现并修复第 5 项（2026-10-07，阶段 6 引入；含三项显示观察）**：
+
+| 项 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1.2 画面缩放（主） | 主控端 1920×1080 连 954×910 被控端：画面未等比缩放、卡窗口左上、超出部分被原始像素填满（用户截图：右半屏"被照片平铺"观感） | `ScreenView` 默认 `_fit_mode=False`（阶段 6 刻意"远桌面 1:1 左上对齐"语义），且 `fitInView` 只在手动开 fit/全屏时触发——**无 resizeEvent 重算**，拖窗/全屏/分辨率变化都不会更新缩放；背景 brush 走主题深灰非纯黑，黑边观感差 | 默认策略改为**适应窗口**（VNC/TeamViewer 同语义）：`_fit_mode=True` + `AlignCenter` + 纯黑 `setBackgroundBrush` + `SmoothPixmapTransform`；新增 `resizeEvent` 在视口变化时重算 `fitInView(KeepAspectRatio)`；`present_image` 仅在**分辨率变化**时重算（每帧 fitInView 会致矩阵抖动），1:1 模式保留（显式 `set_fit_mode(False)` 回左上+滚动条，对齐方式随模式切换）；全屏切换不再动 fit（旧版退出全屏强切 1:1 会把窗口态带回老 bug） |
+| 显示观察（次） | ① 静止画面状态栏"0.0 FPS"观感差；② 画质指示"较差"红点但画面清晰；③ 状态栏无远端分辨率 | ①② framerate 控制器 idle 降载（画面静止 0 帧属正常），但 UI 把 0 帧/0fps 当"质量差"渲染；③ 指标链路有 `resolution` 字段、状态栏无展示位 | ① `StatusBar._tick_fps` 静止时显示 `idle`；② `QualityIndicator.update_quality` fps≤0 判为 idle 档（等级只看延迟/丢包，详情 `Nms \| idle`，v4 阈值表其余不动）；③ 状态栏新增分辨率标签（`metrics_updated` 接线、断开清除） |
+
+**哨兵测试补齐·第五批**（1 项新增 + 3 项适配）：`test_fit_mode_black_borders_out_of_bounds`——默认 fit 断言 + 100×100 帧进 400×300 视口缩放因子 =3（撑满高度维）+ 中心点坐标映射正确 + 左右黑边 `remote_pos` 返回 None（病灶上默认 1:1 直接红）；既有 2 个 1:1 坐标用例显式 `set_fit_mode(False)` 保留原语义验证；`test_fullscreen_toggle_pair` 重写为"fit 常驻、切换只动窗口模式"。
+
+**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验），待用户重测确认；封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
 
@@ -183,7 +192,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1440 passed / 2 skipped，+23 为四轮走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12，其中第四批含协议/服务端/controller/UI 四层）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
+（收口后走查修复终态：pytest 1441 passed / 2 skipped，+24 为五轮走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1，另有 3 项既有用例按新语义适配改写；第四批含协议/服务端/controller/UI 四层）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
