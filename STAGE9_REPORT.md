@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug（三轮详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1428 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷（四批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1440 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -162,7 +162,17 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **哨兵测试补齐·第三轮**（8 项）：`tests/unit/test_encoding_h264.py::TestOddSizeAlignment`（7 项）——奇数构造 ctx 尺寸断言、奇数流解码往返、**跟随重建只发生一次**（81×61 持续进来不得每帧重建）、`set_resolution` 对齐+幂等、单边奇数、极小尺寸（2×2 可建可编 / 1×1 拒绝）；`tests/unit/test_server_pipeline.py::TestOddResolutionEndToEnd`（1 项）——真实默认工厂（不经替身）跑 955×911 源帧，断言不再崩且发布对齐尺寸 954×910。已验证：stash 回退修复后病灶代码上 **8 项全红**（复现生产同款 `libx264 打开失败 (955x910)` traceback），修复后全绿；2×2 下限经临时探针实测本机 x264 接受后方入测试。
 
-**走查其余项**：GUI 启动修复后，1.2-1.8 / 2.x / 3.x / 4.x / 5.x / 6.x 走查方可继续（此前阻塞在 1.1，第二轮后阻塞点为 1.2 主控连接路径，第三轮修复后 1.2 待用户重测窗口模式画面确认）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
+**已发现并修复第 4 项（2026-10-07，认证流程三项 UX/逻辑缺陷）**：
+
+| 项 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1.3 错口令提示 | 服务端审计 `auth.failure reason=bad_password`、协议层 `AuthError('认证失败: 口令校验失败')` 齐全，但 GUI 只显示状态机流转（connecting/reconnecting/disconnected），用户看不到"口令错误" | `main_window._handle_connect_failure` 只看 `auto_reconnect` 开关分流，把一切异常归入 RECONNECTING/泛化"连接失败"，异常携带的原因串被吞 | 失败按异常类型分派：认证/TLS 被拒 → 落定 DISCONNECTED + 状态栏红字直显具体原因；新增 `AuthCancelledError`（AuthError 子类，controller 取消点原抛裸 AuthError）区分"用户主动取消" → 中性"已取消连接"不误报失败；网络类保持原重连策略不变 |
+| 1.4 封禁无感知 | 服务端 `auth.ban attempts=3` 后持续 `conn.rejected reason=banned`，但客户端每次点连接仍弹口令框、输入后连接被重置——用户不知被封，反复白试 | 准入拒绝发生在**握手前**：`check_client=False → writer.close()`（批 3 基线设计：被封 IP 不消耗 bcrypt/不发握手帧），客户端只能看到 OSError | 向后兼容的**接线开关**：协议 `AuthResponse` 只增字段 `banned=7` / `ban_remaining_seconds=8`（proto3 默认值不上线，字节快照不变；pb2 经 `scripts/gen_proto.py` 离线重生成）；装配点 `ban_query=self._auth.ban_remaining_seconds` 接线后，命中封禁时服务端先消费对端 AuthRequest 再回一帧 banned 响应（限 `BAN_NOTICE_READ_TIMEOUT=5s`，洪水连接不发帧即静默关，开销与裸关同量级；未接线/非封禁拒绝维持裸关基线）；客户端 `AuthBannedError` 携剩余秒，controller 按主机缓存到期时刻（注入时钟），二次 connect **不发网络包、不弹口令框**直接提示"已被服务端封禁，请约 N 分钟后重试" |
+| 1.3 一次点击双重认证 | 同秒日志 `connect_failed → reconnect_attempt(wait=2.0) → reconnect_auth_class_abort → new=disconnected → reconnect_success`；服务端同刻两条 `bad_password`。用户"点 2 次就触发封禁"（阈值 3） | 首连 `AuthError` 在 `auto_reconnect` 下也起环；环内 attempt 立即复用 `_password_holder` 里同一份错误口令再认证一次（计数 ×2，且**不等退避**——`wait` 在 `ReconnectController.run` 里是"失败后 sleep"，attempt 返回 True 直接短路，所以日志 wait=2.0 从未生效）；更糟：环把认证类中止 `return True` 当连接成功，记 `reconnect_success`（日志自相矛盾即此） | 认证/TLS/rdc-ConnectionError 统一为 `_AUTH_CLASS_ERRORS`：首连失败**绝不进重连环**，直接落定 disconnected 上抛（一次点击=恰好一次服务端认证尝试）；环内此类失败改为异常上抛、由环收尾落定，消除假 success；语义统一为"网络类才重试、认证类一律终止"（不烧对端封禁窗口） |
+
+**哨兵测试补齐·第四批**（9 项 + 2 UI 项）：`TestBanCache`（controller 4 项：首响应缓存/二次 connect 弹框前拦截且不建通道/换主机不误拦/假时钟过期放行）、`TestBanNotice`（服务端 3 项三态：接线命中封禁回帧含剩余秒/非封禁拒绝静默/**未接线维持裸关基线**）、`test_transport_handshake.py` 封禁分支 2 项（banned→AuthBannedError 分钟折算文案 + 子类断言）；UI 层缺陷 1 两分支各 1 项（认证被拒红字含原因/取消中性文案）在 `test_ui_main_window.py`。stash 回退行为层三文件验证：病灶上相关哨兵转红（含 `ban_query` 参数不存在、`_ban_host` 缺失、裸 AuthError 文案三种失败形态），修复后全绿。
+
+**走查其余项**：第四批修复后 1.2 画面显示（待用户确认）、1.3/1.4 重测均已解锁；封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
 
@@ -173,7 +183,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1428 passed / 2 skipped，+11 为三轮走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
+（收口后走查修复终态：pytest 1440 passed / 2 skipped，+23 为四轮走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12，其中第四批含协议/服务端/controller/UI 四层）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
@@ -193,7 +203,7 @@ pip-audit: 0 vulnerabilities
 
 | # | 项 | 归属 |
 |---|---|---|
-| 1 | 真机走查 45 项：**已回报三轮**——第一轮 1.1 GUI 启动 bug、第二轮 launcher→主窗切换崩溃 bug、第三轮 1.2 奇数分辨率编码器崩溃 bug 均已修复（§6，哨兵测试共 11 项入仓）；1.2 窗口模式画面待用户重测确认，其余项走查结果待继续回报 | 走查进行中 |
+| 1 | 真机走查 45 项：**已回报四轮**——第一轮 1.1 GUI 启动 bug、第二轮 launcher→主窗切换崩溃 bug、第三轮 1.2 奇数分辨率编码器崩溃 bug、第四批认证流程三缺陷（错口令无提示/封禁无感知/一次点击双重认证）均已修复（§6，哨兵测试共 23 项入仓）；1.2 窗口模式画面与 1.3/1.4 认证体验待用户重测确认，其余项走查结果待继续回报 | 走查进行中 |
 | 2 | 符号链接逃逸实测用例在本机 skip（非管理员无 symlink 权限），CI/开发者模式环境自动生效 | 阶段 10 CI |
 | 3 | 硬编选项映射为空（`_hardware_options` 不发明参数），硬件编码器真正启用需逐卡标定 | 阶段 10 |
 | 4 | qasync 官方声明 <3.14；本机 3.14.3 四判据实测通过，3.16 时切换 PoC 保留方案乙 | 阶段 10 / 环境升级 |
