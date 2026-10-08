@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Protocol
 
+import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QImage, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QVBoxLayout, QWidget
@@ -74,8 +75,9 @@ class ClientController(Protocol):
     结构天然满足；跨线程实现必须自行投递）。
     """
 
-    def set_events(self, events: ClientEvents) -> None:
-        """注册事件回调（connect 之前调用）。"""
+    def set_events(self, events: ClientEvents | None) -> None:
+        """注册事件回调（connect 之前调用）；``None`` = 解除绑定（关窗防回调
+        触达已销毁 UI，走查第六批 Bug5）。"""
         ...
 
     async def connect(
@@ -233,9 +235,23 @@ class MainWindow(QMainWindow):
         """当前连接状态。"""
         return self._state
 
+    def _ui_alive(self) -> bool:
+        """C++ 侧窗口（及其子控件树）是否仍存活。
+
+        走查第六批 Bug5：``session.py`` 给主窗挂 ``WA_DeleteOnClose``——关窗即
+        销毁 ScreenView/StatusBar 等子对象，而 controller 仍持有本窗的 Python
+        引用并在稍后（disconnect 协程收尾、画面流 EOF 事件）回调事件入口，
+        触达已删对象即抛 ``RuntimeError: Internal C++ object already deleted``
+        （真机日志 event_hook_failed hook=state_changed）。``shiboken6.isValid``
+        对**已删自身**返回 False，子对象随父树同删，故本判定覆盖全部下游触达。
+        """
+        return shiboken6.isValid(self)
+
     def state_changed(self, state: str) -> None:
         """ClientEvents 实现：controller 状态变化入口（幂等设态）。"""
         ensure_gui_thread("MainWindow.state_changed")
+        if not self._ui_alive():
+            return
         self._set_state(state)
 
     def _set_state(self, new: ConnectionState | str) -> None:
@@ -269,6 +285,8 @@ class MainWindow(QMainWindow):
     def frame_arrived(self, image: QImage, *, left: int = 0, top: int = 0) -> None:
         """ClientEvents：新解码帧上屏 + FPS 计数。"""
         ensure_gui_thread("MainWindow.frame_arrived")
+        if not self._ui_alive():
+            return
         self.screen_view.present_image(image, left=left, top=top)
         self.status_bar.notify_frame()
 
@@ -285,6 +303,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         """ClientEvents：指标快照分发到状态栏/性能面板/指示灯。"""
         ensure_gui_thread("MainWindow.metrics_updated")
+        if not self._ui_alive():
+            return
         self.status_bar.set_latency(latency_ms)
         self.status_bar.set_quality(quality)
         self.status_bar.set_resolution(resolution)
@@ -314,6 +334,8 @@ class MainWindow(QMainWindow):
         画面暂停"；普通停滞 → 提示采集异常等待自愈；恢复 → 状态栏回常态。
         """
         ensure_gui_thread("MainWindow.host_status")
+        if not self._ui_alive():
+            return
         if stalled:
             if secure_desktop:
                 self.status_bar.set_status(
@@ -492,6 +514,11 @@ class MainWindow(QMainWindow):
         self.clipboard.stop()
         self.status_bar.stop()
         if self._controller is not None:
+            # 走查第六批 Bug5（纵深防御第一层）：**先解绑回调源**再调度断开。
+            # disconnect() 是后台协程，其收尾的 state_changed("disconnected")
+            # 可能落在本窗（WA_DeleteOnClose）销毁之后；解绑后 controller 不再
+            # 持有本窗引用，事件自然停发。_ui_alive() 守卫兜住其它拆窗路径。
+            self._controller.set_events(None)
             # 尽力断开；事件循环若已在关停则跳过（阶段 9 统一异步关停编排）
             try:
                 running = asyncio.get_running_loop()

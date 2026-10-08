@@ -203,3 +203,63 @@ class TestHostStatusHint:
         assert "采集异常" in text, text
         w.host_status(stalled=False, secure_desktop=False)
         assert "恢复" in w.status_bar._status.text(), w.status_bar._status.text()  # noqa: SLF001
+
+
+class TestDeletedUiCallbacks:
+    """走查第六批 Bug5：主窗销毁后 controller 迟到回调不得触达已删 C++ 对象。
+
+    生产病灶：client_session 给主窗挂 ``WA_DeleteOnClose``——关窗即销毁
+    ScreenView 等子对象，而 controller 仍持其 Python 引用，随后 disconnect
+    收尾/画面流 EOF 触发的 ``state_changed`` / ``frame_arrived`` 直达已删对象
+    （真机日志 ``event_hook_failed hook=state_changed 'Internal C++ object
+    (ScreenView) already deleted'``）。修复两层：事件入口 ``_ui_alive()``
+    （shiboken6.isValid）守卫 + closeEvent 先 ``set_events(None)`` 解绑。
+    """
+
+    def _closed_win(self, qtbot):
+        import shiboken6
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt
+        from PySide6.QtTest import QTest
+
+        c = FakeController()
+        w = MainWindow(c)
+        w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        w.show()
+        QTest.qWaitForWindowExposed(w)
+        w.close()
+        # 立即冲刷 DeferredDelete：C++ 侧此刻真删（生产关窗同效）
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert not shiboken6.isValid(w)  # 前提成立：窗口（连同子树）已销毁
+        return w, c
+
+    def test_state_changed_after_delete_is_noop(self, qapp, qtbot) -> None:
+        w, _ = self._closed_win(qtbot)
+        # 病灶：直达 _set_state → screen_view.set_input_enabled → RuntimeError
+        w.state_changed(ConnectionState.DISCONNECTED)  # 修复后：守卫 no-op
+
+    def test_frame_metrics_host_status_after_delete_is_noop(self, qapp, qtbot) -> None:
+        w, _ = self._closed_win(qtbot)
+        img = QImage(8, 8, QImage.Format.Format_RGB32)
+        w.frame_arrived(img)
+        w.metrics_updated(fps=1.0, latency_ms=2.0)
+        w.host_status(stalled=True, secure_desktop=True)
+
+    def test_closeevent_unbinds_events_before_disconnect(self, qapp, qtbot) -> None:
+        """第一层防御：closeEvent 先解绑回调源，disconnect 收尾不再回触本窗。"""
+        from PySide6.QtTest import QTest
+
+        c = FakeController()
+        assert c.events is None
+        w = MainWindow(c)
+        # 镜像生产 run_gui：关最后一个窗口不触发 app.quit（否则 drive 环早停）
+        qapp.setQuitOnLastWindowClosed(False)
+        w.show()
+        QTest.qWaitForWindowExposed(w)
+
+        async def _main() -> None:
+            w.close()  # closeEvent：set_events(None) + ensure_future(disconnect)
+            await asyncio.sleep(0.05)
+
+        drive(qapp, _main)
+        assert c.events is None  # 病灶：closeEvent 不解绑 → 仍指向已关窗口
+        assert c.disconnect_calls == 1  # 断开仍被尽力调度（原有语义保留）
