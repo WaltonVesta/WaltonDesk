@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）（六批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1462 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）+ 键盘标点/Tab·Win 泄漏 + 封禁告知竞态 + 异常断连卡键 + 断连回调已删窗 + 封禁倒计时（六批详见 §6 走查记录） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1508 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -191,18 +191,30 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **v5.1.0 特权操作范围（本批记入文档，不在 v5.0.0 实现）**：v5.0.0 对安全桌面的正确行为止于"如实提示 + UAC 结束后自愈"——进入安全桌面（看/操作 UAC 弹窗本身）受 Windows 安全边界限制，需要：① Windows 服务化（SYSTEM 权限，Session 0 常驻）；② UIAccess=true 声明（EV 代码签名证书 + 受保护安装目录）；③ 安全桌面内画面采集与键鼠注入（TeamViewer "支持 UAC" 同级能力）；④ 驱动级采集兜底（如 BitBlt 长期不可用场景，按需）；⑤ 服务 ↔ 用户态会话通信通道。
 
-**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复画面流）。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
+**第六批其余五项（P1/P2，逐 bug 独立 commit）**：
+
+| bug | 现象 | 根因 | 修复 | commit |
+|---|---|---|---|---|
+| 2（P1）键盘标点无效 + Tab/Win 泄漏 | 标点 `!@#$%^&*()_+-={}[]\|;:'",.<>?~\`` 全部注入失败；Tab 走本地焦点导航、Win 触发主控端开始菜单 | 两层：① `_VkKeyScanW` 未声明 `restype=c_short` → ctypes 读全 32 位寄存器，高 16 位垃圾使未移位标点 `; , . /` 也被判 `scan>0xFF`；且 `_resolve_key` 对 `scan>0xFF`（含 shift 状态位）一律拒绝——但物理键模型下 Shift 是**独立键事件先行注入**，远端已持修饰态，只需基键 VK；② 控制态点击画面未抓键盘焦点，Tab/Win 落工具栏/窗口 | ① `_VkKeyScanW.restype=c_short`；`_resolve_key` 取 `scan & 0xFF` 基键（不再拒 shift 符号）；② `mousePressEvent` 控制态 `setFocus()`，配合 `keyPressEvent` 已有 `accept()`；③ 未映射键日志 debug→warning（可观测） | `71cf4a5` |
+| 3（P1）封禁告知未生效 | 服务端封禁生效，客户端得 `ConnectionResetError('Connection lost')` 而非 `AuthBannedError`，反复白弹口令框 | **真机竞态**（集成测试未暴露）：客户端 `connect()` 是 TLS→**弹框等真人打字**→才发 AuthRequest；服务端 `_reject_control` 回帧读窗口旧固定 5s < 真人打字耗时 → 超时裸关 → 客户端把 AuthRequest 发进已关连接得 RST，banned 帧从未送达、本地缓存永不建立 | `BAN_NOTICE_READ_TIMEOUT` 对齐 `HANDSHAKE_TIMEOUT`(10s)；回帧成功走 `FrameStream.close()+wait_closed()` 优雅冲刷 TLS（对齐正常握手拒绝路径），未回帧仍裸关维持零响应基线 | `bb9655d` |
+| 4（P1）异常断连修饰键残留 | 按住 Win→拔网线→远端 Win 未释放（Win+D 触发显示桌面）；正常"点断开"无卡键 | `_serve_control` 的 `await next_message()` 无超时：静默断网无 FIN/RST（TCP 半开），阻塞到 OS keepalive（Windows ~2 小时），`finally: _reset_input()` 迟迟不触发 | 控制环加读空闲上限 = `heartbeat_timeout`(默认 10s，客户端每 3s 必发 PING，静默即真死不误伤)；静默超时 `break` → finally reset，卡键窗口从 ~2h 收敛到 ~10s；`conn_close` 加 `reason=idle_timeout` | `cdf5dd1` |
+| 5（P2）断连 `ScreenView already deleted` | 断连日志 `event_hook_failed ... Internal C++ object (ScreenView) already deleted` hook=state_changed | `client_session` 给主窗挂 `WA_DeleteOnClose`：关窗销毁子控件树，controller 仍持窗口 Python 引用，随后 disconnect 收尾/画面 EOF 的回调直达已删对象 | 两层防御：① 全部 controller→UI 事件入口加 `_ui_alive()`（`shiboken6.isValid`）守卫，销毁后 no-op；② `closeEvent` 先 `set_events(None)` 解绑再调度断开（协议签名放开 None） | `5e85dff` |
+| 6（P2）封禁期无倒计时 | 封禁期间连接按钮不禁用、无倒计时，用户反复点入被拒 | UI 收到 `AuthBannedError` 只落红字，未压制按钮/未倒数 | `_handle_connect_failure` 先于 AuthError 分支拦截 `AuthBannedError`（其子类）→ 墙钟 QTimer 倒计时（起点=服务端回传 `remaining_seconds`）：禁用连接按钮 + 状态栏"X 分 Y 秒后可重试"每秒刷新，归零自动恢复；重复被拒复用同一定时器取最新剩余秒；连接成功/关窗清残留；toolbar 加 `set_connect_enabled()` | `9c09e48` |
+
+**哨兵测试补齐·第六批 Bug2-6**（每项 stash 双红验证后转绿）：Bug2 全量标点参数化 32 + restype 锁定 + UI 点击抓焦（病灶 23 项转红）；Bug3 窗口不变式 + 窗口内/外慢客户端竞态 3（病灶上不变式 `assert 5.0==10.0` 转红）；Bug4 静默半开链路 idle→reset + 活链路不误伤 2（病灶上以 5s 断言超时收场，测试自身已改为 finally 先关客户端防挂死套件）；Bug5 销毁后 state/frame/metrics/host_status 四回调 no-op + closeEvent 解绑 3；Bug6 倒计时禁用/每秒刷新/归零恢复/重复触发复用/连接成功清表 4。全量 **1508 passed / 2 skipped**（P0 后 1462 → Bug2 +34 → Bug3 +3 → Bug4 +2 → Bug5 +3 → Bug6 +4）。
+
+**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**（1.2）、**键盘标点/Tab/Win**（2.7/3.x）、**封禁体验**（1.4）、**异常断开卡键**（1.7）待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复；封禁期连接按钮禁用带倒计时）。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
 
 ```
 ruff:   All checks passed!（全仓）
-mypy:   Success: no issues found in 98 source files
+mypy:   Success: no issues found in 99 source files
 pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1441 passed / 2 skipped，+24 为五轮走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1，另有 3 项既有用例按新语义适配改写；第四批含协议/服务端/controller/UI 四层）；mypy 源文件数 98 不变，src 未新增文件。详见 §6）
+（收口后走查修复终态：pytest 1508 passed / 2 skipped，+47 为六批走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1 + 第六批 23〔P0 21 项含新增 desktop.py 探针模块 + Bug2-6 逐项〕，另有若干既有用例按新语义适配改写）；mypy 源文件数 98→99（第六批 P0 新增 `capture/desktop.py` 桌面探针）。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
@@ -222,7 +234,7 @@ pip-audit: 0 vulnerabilities
 
 | # | 项 | 归属 |
 |---|---|---|
-| 1 | 真机走查 45 项：**已回报四轮**——第一轮 1.1 GUI 启动 bug、第二轮 launcher→主窗切换崩溃 bug、第三轮 1.2 奇数分辨率编码器崩溃 bug、第四批认证流程三缺陷（错口令无提示/封禁无感知/一次点击双重认证）均已修复（§6，哨兵测试共 23 项入仓）；1.2 窗口模式画面与 1.3/1.4 认证体验待用户重测确认，其余项走查结果待继续回报 | 走查进行中 |
+| 1 | 真机走查 45 项：**已回报六批**——第一轮 1.1 GUI 启动、第二轮 launcher→主窗切换崩溃、第三轮 1.2 奇数分辨率编码器崩溃、第四批认证三缺陷（错口令无提示/封禁无感知/一次点击双重认证）、第五批 1.2 画面缩放策略、第六批 P0 UAC 安全桌面画面永久停 + Bug2-6（键盘标点/Tab·Win 泄漏、封禁告知竞态、异常断连卡键、断连回调已删窗、封禁倒计时）均已修复（§6，哨兵测试共 47 项入仓）；1.2 窗口模式/UAC、1.3/1.4 认证与封禁体验、1.7 异常断开、2.7/3.x 键盘待用户重测确认，4.x/5.x/6.x/7.x 走查结果待继续回报 | 走查进行中 |
 | 2 | 符号链接逃逸实测用例在本机 skip（非管理员无 symlink 权限），CI/开发者模式环境自动生效 | 阶段 10 CI |
 | 3 | 硬编选项映射为空（`_hardware_options` 不发明参数），硬件编码器真正启用需逐卡标定 | 阶段 10 |
 | 4 | qasync 官方声明 <3.14；本机 3.14.3 四判据实测通过，3.16 时切换 PoC 保留方案乙 | 阶段 10 / 环境升级 |
