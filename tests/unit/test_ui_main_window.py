@@ -263,3 +263,70 @@ class TestDeletedUiCallbacks:
         drive(qapp, _main)
         assert c.events is None  # 病灶：closeEvent 不解绑 → 仍指向已关窗口
         assert c.disconnect_calls == 1  # 断开仍被尽力调度（原有语义保留）
+
+
+class TestBanCountdown:
+    """走查第六批 Bug6：封禁期禁用连接按钮 + 倒计时，归零自动恢复。"""
+
+    def _win(self, qtbot, *, ctrl=None, settings=None):
+        c = ctrl or FakeController()
+        w = MainWindow(c, settings=settings)
+        qtbot.addWidget(w)
+        return w, c
+
+    def test_banned_error_disables_button_and_starts_countdown(self, qapp, qtbot) -> None:
+        """_handle_connect_failure 收到 AuthBannedError → 禁用连接 + 启动倒计时。"""
+        from rdc.exceptions import AuthBannedError
+
+        w, _ = self._win(qtbot)
+        w._handle_connect_failure(  # noqa: SLF001
+            "1.2.3.4", AuthBannedError("已被封禁", remaining_seconds=90)
+        )
+        assert w.state == ConnectionState.DISCONNECTED
+        assert not w.toolbar._connect_btn.isEnabled()  # noqa: SLF001
+        assert w._ban_remaining_s == 90  # noqa: SLF001
+        assert w._ban_timer is not None and w._ban_timer.isActive()  # noqa: SLF001
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert "1 分 30 秒后可重试" in text, text
+        w._stop_ban_countdown()  # noqa: SLF001 - 清理，防跨用例残留定时器
+
+    def test_tick_renders_and_zero_restores(self, qapp, qtbot) -> None:
+        """倒计时每秒递减；归零停表并恢复连接按钮。"""
+        w, _ = self._win(qtbot)
+        w._start_ban_countdown(3)  # noqa: SLF001
+        assert not w.toolbar._connect_btn.isEnabled()  # noqa: SLF001
+        assert w._ban_remaining_s == 3  # noqa: SLF001
+
+        w._tick_ban_countdown()  # noqa: SLF001 → 2
+        assert "2 秒后可重试" in w.status_bar._status.text()  # noqa: SLF001
+        w._tick_ban_countdown()  # noqa: SLF001 → 1
+        assert "1 秒后可重试" in w.status_bar._status.text()  # noqa: SLF001
+        w._tick_ban_countdown()  # noqa: SLF001 → 0：停表 + 恢复按钮
+        assert w._ban_remaining_s == 0  # noqa: SLF001
+        assert not w._ban_timer.isActive()  # noqa: SLF001
+        assert w.toolbar._connect_btn.isEnabled()  # noqa: SLF001
+
+    def test_retrigger_resets_to_latest_remaining(self, qapp, qtbot) -> None:
+        """封禁期再点连接又被拒：以最新剩余秒重置（不叠加多个定时器）。"""
+        from rdc.exceptions import AuthBannedError
+
+        w, _ = self._win(qtbot)
+        w._handle_connect_failure(  # noqa: SLF001
+            "h", AuthBannedError("", remaining_seconds=120)
+        )
+        timer_first = w._ban_timer  # noqa: SLF001
+        w._handle_connect_failure(  # noqa: SLF001
+            "h", AuthBannedError("", remaining_seconds=45)
+        )
+        assert w._ban_timer is timer_first  # noqa: SLF001 - 复用同一定时器
+        assert w._ban_remaining_s == 45  # noqa: SLF001
+        w._stop_ban_countdown()  # noqa: SLF001
+
+    def test_connect_success_clears_countdown(self, qapp, qtbot) -> None:
+        """倒计时进行中若连接成功（另一主机/解封）→ 清除残留定时器。"""
+        w, _ = self._win(qtbot)
+        w._start_ban_countdown(50)  # noqa: SLF001
+        assert w._ban_timer.isActive()  # noqa: SLF001
+        w._on_connect_success("9.9.9.9")  # noqa: SLF001
+        assert not w._ban_timer.isActive()  # noqa: SLF001
+        assert w._ban_remaining_s == 0  # noqa: SLF001

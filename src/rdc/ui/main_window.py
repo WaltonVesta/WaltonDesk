@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import Protocol
 
 import shiboken6
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QImage, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
@@ -35,7 +35,7 @@ from rdc.config.settings import (
     save_settings,
     set_current,
 )
-from rdc.exceptions import AuthCancelledError, AuthError, TlsError
+from rdc.exceptions import AuthBannedError, AuthCancelledError, AuthError, TlsError
 from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.clipboard_sync import ClipboardSync
@@ -163,6 +163,10 @@ class MainWindow(QMainWindow):
         self._state = ConnectionState.IDLE
         self._control_on = False
         self._tasks: set[asyncio.Task[object]] = set()
+        #: 封禁倒计时（走查第六批 Bug6）：墙钟 QTimer 每秒刷新状态栏，
+        #: 归零自动恢复连接按钮。None = 无倒计时。
+        self._ban_timer: QTimer | None = None
+        self._ban_remaining_s = 0
         self.setWindowTitle("远程桌面控制 v5 — 主控端")
         self.resize(1080, 720)
 
@@ -390,12 +394,20 @@ class MainWindow(QMainWindow):
           （主动放弃不报"认证失败"，避免误导）；
         - 认证/TLS 被拒（AuthError/TlsError）→ controller 已不重连（缺陷 3），
           UI 直接落定 DISCONNECTED 并用红字展示具体原因（如"口令校验失败"）；
+        - 封禁（AuthBannedError，AuthError 子类）→ 落定 DISCONNECTED 后**额外
+          禁用连接按钮 + 启动墙钟倒计时**（走查第六批 Bug6），归零自动恢复；
         - 其余（网络类）→ 沿用 auto_reconnect 策略：开 → RECONNECTING
           （controller 内部重试），关 → DISCONNECTED 泛化错误文本。
         """
         if isinstance(exc, AuthCancelledError):
             self._set_state(ConnectionState.DISCONNECTED)
             self.status_bar.set_status("已取消连接", "disconnected")
+            self.toolbar.set_host_editable(True)
+            return
+        if isinstance(exc, AuthBannedError):
+            # 先于 (AuthError, TlsError) 判定：AuthBannedError 是其子类
+            self._set_state(ConnectionState.DISCONNECTED)  # 会重新启用连接按钮
+            self._start_ban_countdown(exc.remaining_seconds)  # 随即禁用 + 倒计时
             self.toolbar.set_host_editable(True)
             return
         if isinstance(exc, (AuthError, TlsError)):
@@ -411,9 +423,54 @@ class MainWindow(QMainWindow):
             self.toolbar.set_host_editable(True)
 
     def _on_connect_success(self, host: str) -> None:
+        self._stop_ban_countdown(restore_button=False)  # 成功即清残留倒计时（按钮归状态机管）
         self._set_state(ConnectionState.CONNECTED)
         self.toolbar.add_recent_host(host)
         self.status_bar.set_info(host)
+
+    # -- 封禁倒计时（走查第六批 Bug6） -----------------------------------------
+
+    def _start_ban_countdown(self, remaining_seconds: int) -> None:
+        """启动封禁倒计时：禁用连接按钮 + 状态栏每秒刷新，归零自动恢复。
+
+        ``remaining_seconds`` 来自 controller 依服务端回传缓存折算（Bug3 的
+        ``AuthBannedError.remaining_seconds``）。UI 用墙钟 QTimer 独立倒数，
+        与 controller 注入时钟解耦（此处只需真实秒级观感）。重复触发（封禁期
+        再点连接又被拒）以最新剩余秒重置。
+        """
+        ensure_gui_thread("MainWindow._start_ban_countdown")
+        self._ban_remaining_s = max(0, int(remaining_seconds))
+        self.toolbar.set_connect_enabled(False)
+        self._render_ban_countdown()
+        if self._ban_timer is None:
+            self._ban_timer = QTimer(self)
+            self._ban_timer.setInterval(1000)
+            self._ban_timer.timeout.connect(self._tick_ban_countdown)
+        self._ban_timer.start()
+
+    def _tick_ban_countdown(self) -> None:
+        """每秒递减；归零停表并恢复连接按钮。"""
+        self._ban_remaining_s -= 1
+        if self._ban_remaining_s <= 0:
+            self._stop_ban_countdown()
+            return
+        self._render_ban_countdown()
+
+    def _render_ban_countdown(self) -> None:
+        """刷新状态栏倒计时文案（"X 分 Y 秒后可重试" / "Y 秒后可重试"）。"""
+        secs = max(0, self._ban_remaining_s)
+        mins, rest = divmod(secs, 60)
+        tail = f"{mins} 分 {rest} 秒后可重试" if mins else f"{rest} 秒后可重试"
+        self.status_bar.set_status(f"已被服务端封禁，{tail}", "error")
+
+    def _stop_ban_countdown(self, *, restore_button: bool = True) -> None:
+        """停倒计时（幂等）。``restore_button`` 决定是否恢复连接按钮可用性
+        （归零恢复=True；连接成功/关窗时按钮由状态机管理，传 False）。"""
+        if self._ban_timer is not None:
+            self._ban_timer.stop()
+        self._ban_remaining_s = 0
+        if restore_button:
+            self.toolbar.set_connect_enabled(True)
 
     async def _user_disconnect(self) -> None:
         """主动断开：不走重连。"""
@@ -511,6 +568,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt 覆写
         ensure_gui_thread("MainWindow.closeEvent")
+        self._stop_ban_countdown(restore_button=False)
         self.clipboard.stop()
         self.status_bar.stop()
         if self._controller is not None:

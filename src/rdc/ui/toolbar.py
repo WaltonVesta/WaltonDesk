@@ -143,6 +143,15 @@ class Toolbar(QWidget):
         ensure_gui_thread("Toolbar.set_host_editable")
         self._host.setEnabled(editable)
 
+    def set_connect_enabled(self, enabled: bool) -> None:
+        """禁用/启用连接按钮（走查第六批 Bug6：封禁倒计时期间禁用，归零恢复）。
+
+        与 :meth:`set_connection_state` 的按钮态解耦：仅在已断开态由封禁倒计时
+        临时压制，不改变其它状态机联动。
+        """
+        ensure_gui_thread("Toolbar.set_connect_enabled")
+        self._connect_btn.setEnabled(enabled)
+
     def set_control_state(self, enabled: bool) -> None:
         """同步"启用/禁用控制"按钮文案（幂等；不触发信号）。"""
         ensure_gui_thread("Toolbar.set_control_state")
