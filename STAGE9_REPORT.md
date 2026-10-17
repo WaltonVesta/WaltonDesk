@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）+ 键盘标点/Tab·Win 泄漏 + 封禁告知竞态 + 异常断连卡键 + 断连回调已删窗 + 封禁倒计时（六批详见 §6 走查记录） · 2026-10-17 第六批复测回归修复 VkKeyScanW argtypes 缺失（§6） · 2026-10-17 走查第九批修复 Win 键释放被系统吞掉致被控端卡键（§6，v5.0.0 应急兜底 + README 已知限制） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1508 passed / 2 skipped → 复测回归修复后 1511 passed / 2 skipped → 第九批后 1518 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）+ 键盘标点/Tab·Win 泄漏 + 封禁告知竞态 + 异常断连卡键 + 断连回调已删窗 + 封禁倒计时（六批详见 §6 走查记录） · 2026-10-17 第六批复测回归修复 VkKeyScanW argtypes 缺失（§6） · 2026-10-17 走查第九批修复 Win 键释放被系统吞掉致被控端卡键（§6，v5.0.0 应急兜底 + README 已知限制） · 2026-10-17 走查第十批修复 Tab/Backtab 被 Qt 焦点链提前消费致控制态泄漏（§6，视图覆写 + 应用级守卫双层） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1508 passed / 2 skipped → 复测回归修复后 1511 passed / 2 skipped → 第九批后 1518 passed / 2 skipped → 第十批后 1523 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -235,7 +235,29 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 **v5.1.0 特权操作范围（本批扩充，用户指定记入）**：在第 6 批 P0 段所列 5 项（服务化 / UIAccess / 安全桌面采集与注入 / 驱动级采集兜底 / 服务↔用户态通道）之外，本批新增第 ⑥ 项：**完整 Win 键处理**——低级键盘钩子 `WH_KEYBOARD_LL` 拦截 Win 的**按下与释放**并转发，实现单键 Win（开开始菜单）与 `Win+组合` 的真正远程语义；钩子须限定"仅 rdc 会话激活时生效"，避免未连接时拦截本机 Win。
 
-**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**（1.2）、**键盘标点/Tab/Win**（2.7/3.x）、**封禁体验**（1.4）、**异常断开卡键**（1.7）待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复；封禁期连接按钮禁用带倒计时）。**键盘标点已复测一次**：检出 `71cf4a5` 配套遗漏（`_VkKeyScanW` argtypes 缺失）致标点全灭，已二次修复（`333ab13`，见上"复测回归"段）。**Win 键同批复测另立第九批**：第六批的抓焦修复解决的是"Win 触发**主控端**开始菜单"（泄漏），复测确认**被控端**仍卡按住——根因是系统吞掉释放事件（焦点修复救不了，事件根本不投递），已按第九批落 2s 超时补发兜底（`8fd2ab1`）。**第九批修复后 Win 键重测预期**：按一次 Win → 被控端约 2s 内自动松开（后续按键不再变 Win+组合），但**开始菜单不会在被控端弹出**、`Win+X/Q/W/V` 仍被主控端系统消费不转发（v5.0.0 已知限制，README 同口径；完整支持归 v5.1.0）。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
+### 第十批：Tab/Backtab 被 Qt 焦点链提前消费 → 控制模式下 Tab 泄漏（2026-10-17，P2；commit `fd6d1ad`）
+
+**复测结论（第九批后）**：标点全部正常 ✅、Win 卡键已解决（2s 自动松开）✅、其余键盘正常 ✅——第六批 `71cf4a5`/复测回归 `333ab13`/第九批 `8fd2ab1` 三连修复生效。残留：**Tab 按下虚拟机无反应，主机 GUI 焦点跳转**。
+
+**根因（探针实测复现）**：Qt 在 `QWidget::event()` 内部把无修饰 Tab/Backtab **直接转成 `focusNextPrevChild()` 焦点导航，发生在 `keyPressEvent` 之前**。因此：
+- 第六批在 `ScreenView.keyPressEvent` 里 `event.accept()` 并注释"Tab 不再跳转"——**误判**（焦点在画面时事件根本走不到 keyPressEvent；裸视图单测焦点链内无可跳转目标，`focusNextPrevChild` 天然失败才回落 keyPress，测试假绿——与第六批 argtypes 同类教训：**哨兵必须跑在病灶场景的装配层**）；
+- 第九批补的 `MainWindow.keyPress/keyRelease` 覆写同样拦不住（焦点在按钮时按钮先消费）。
+- 探针双场景证据：①焦点在画面 → 按 Tab 焦点跳走、零转发；②焦点在工具栏 → 同样跳走、零转发。
+
+**修复（两层）**：
+1. `ScreenView.focusNextPrevChild` 控制态返回 `False`（焦点在画面时导航被拒，按键按普通键继续投递 → keyPressEvent 正常转发）；
+2. 应用级 `MainWindow.eventFilter`：拦本窗控件树（含自身）内 Tab/Backtab 的 KeyPress/KeyRelease 成对转发并吞掉——覆盖焦点在**任意**子控件的场景；三条件门控（已连接 + 控制开启 + 属本窗树），口令/设置/指纹对话框是独立顶层窗不受影响，控制关闭时本窗导航如常；`closeEvent` 卸载过滤器（同第六批 Bug5"先解绑回调源"纵深）。
+
+**哨兵测试补齐·第十批**（5 项，`test_ui_main_window.py::TestTabFocusGuard`；病灶回退双红验证：stash 两 UI 文件 → 3 转发类转红 + stash 仅 screen_view → 覆写契约项转红，恢复后全绿）：
+- `::test_tab_forwards_pair_screen_focus`——焦点在画面：Tab 成对转发 + 焦点不跳（病灶态 `c.keys == []` 且焦点跳走）；
+- `::test_tab_forwards_pair_toolbar_focus`——焦点在工具栏：同样成对转发、焦点保持（应用级过滤器覆盖证明）；
+- `::test_shift_tab_forwards_pair`——Shift+Tab（offscreen 平台发 Key_Tab+Shift 形态）Tab 自身成对转发、无反向导航；
+- `::test_tab_navigates_normally_when_control_off`——控制关闭：零转发 + 本地导航恢复（不误伤）；
+- `::test_view_refuses_navigation_only_when_control_on`——视图覆写本体两分支直调探询（组装场景过滤器先吞事件，覆写是唯一独立防线，需单独锁定）。
+
+全量 **1523 passed / 2 skipped**（1518 + 5），三绿退出码 0（mypy 中途抓到 `QApplication.instance()` 返回 Optional 的 1 个类型错误，已补 None 守卫复绿）。controller 零 Qt 红线不受影响（本批改动全在 UI 层）。
+
+**走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**（1.2）、**键盘标点/Tab/Win**（2.7/3.x）、**封禁体验**（1.4）、**异常断开卡键**（1.7）待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复；封禁期连接按钮禁用带倒计时）。**键盘标点已复测一次**：检出 `71cf4a5` 配套遗漏（`_VkKeyScanW` argtypes 缺失）致标点全灭，已二次修复（`333ab13`，见上"复测回归"段）。**Win 键同批复测另立第九批**：第六批的抓焦修复解决的是"Win 触发**主控端**开始菜单"（泄漏），复测确认**被控端**仍卡按住——根因是系统吞掉释放事件（焦点修复救不了，事件根本不投递），已按第九批落 2s 超时补发兜底（`8fd2ab1`）。**第九批修复后 Win 键重测预期**：按一次 Win → 被控端约 2s 内自动松开（后续按键不再变 Win+组合），但**开始菜单不会在被控端弹出**、`Win+X/Q/W/V` 仍被主控端系统消费不转发（v5.0.0 已知限制，README 同口径；完整支持归 v5.1.0）。**第九批复测通过（标点/Win/其余键盘全 ✅），Tab 残留另立本第十批**（`fd6d1ad`）：**第十批修复后 Tab 重测预期**：控制开启时按 Tab/Shift+Tab → 虚拟机焦点移动（表单/窗口内切焦点），主机 GUI 焦点**不再**跳转；控制关闭时主机 Tab 导航如常。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
 
@@ -246,7 +268,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1508 passed / 2 skipped，+47 为六批走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1 + 第六批 23〔P0 21 项含新增 desktop.py 探针模块 + Bug2-6 逐项〕，另有若干既有用例按新语义适配改写）；mypy 源文件数 98→99（第六批 P0 新增 `capture/desktop.py` 桌面探针）。第六批 Bug2 复测回归修复后再 +3（argtypes 锁定 + 装载区声明完整性审计 + 真机 VkKeyScanW 调用哨兵）达 1511 passed / 2 skipped；**走查第九批（Win 释放丢失）再 +7**（粘滞热键对账 6 + 主窗释放成对转发 1，另 1 项既有用例改名扩写），终态 **1518 passed / 2 skipped**、三绿退出码 0。controller 零 Qt/Widgets 导入红线**第九批改动后复验通过**（新增逻辑仅用本地整型键码表与注入时钟，grep `PySide6|QtWidgets|QtCore|QtGui` 仍零命中）。详见 §6）
+（收口后走查修复终态：pytest 1508 passed / 2 skipped，+47 为六批走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1 + 第六批 23〔P0 21 项含新增 desktop.py 探针模块 + Bug2-6 逐项〕，另有若干既有用例按新语义适配改写）；mypy 源文件数 98→99（第六批 P0 新增 `capture/desktop.py` 桌面探针）。第六批 Bug2 复测回归修复后再 +3（argtypes 锁定 + 装载区声明完整性审计 + 真机 VkKeyScanW 调用哨兵）达 1511 passed / 2 skipped；**走查第九批（Win 释放丢失）再 +7**（粘滞热键对账 6 + 主窗释放成对转发 1，另 1 项既有用例改名扩写），终态 **1518 passed / 2 skipped**、三绿退出码 0。**走查第十批（Tab 焦点链泄漏）再 +5**（`TestTabFocusGuard`：画面/工具栏两焦点场景成对转发 + Shift+Tab + 控制关闭不伤导航 + 视图覆写直调契约），终态 **1523 passed / 2 skipped**、三绿退出码 0。controller 零 Qt/Widgets 导入红线**第九批改动后复验通过**（新增逻辑仅用本地整型键码表与注入时钟，grep `PySide6|QtWidgets|QtCore|QtGui` 仍零命中；第十批改动全在 UI 层不触及）。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
