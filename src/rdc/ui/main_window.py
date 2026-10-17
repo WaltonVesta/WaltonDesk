@@ -24,9 +24,9 @@ from enum import StrEnum
 from typing import Protocol
 
 import shiboken6
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QImage, QKeyEvent, QKeySequence, QShortcut
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
 from rdc.config.settings import (
     Settings,
@@ -222,6 +222,15 @@ class MainWindow(QMainWindow):
 
         if self._controller is not None:
             self._controller.set_events(self)
+
+        # 走查第十批：Tab/Backtab 被 Qt 焦点链在 keyPressEvent **之前**消费
+        # （QWidget::event() 直接转 focusNextPrevChild，谁有焦点谁吃掉——
+        # 按钮/视口都算，控件级 accept() 够不着）。应用级过滤器是拦它的唯一
+        # 入口；仅"已连接+控制开启+事件属本窗控件树"三条件齐才拦截，
+        # 其余场景（含本窗非控制态、其它顶层窗/对话框）导航如常。
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     # -- 状态机 ---------------------------------------------------------------
 
@@ -574,10 +583,42 @@ class MainWindow(QMainWindow):
         if self._controller is not None:
             self._controller.send_key(event.key(), press)
 
+    def eventFilter(self, obj: object, event: object) -> bool:  # noqa: N802
+        """走查第十批：应用级拦截 Tab/Backtab，阻止本地焦点跳转并转发远端。
+
+        Qt 在 ``QWidget::event()`` 把无修饰 Tab/Backtab 转成焦点导航，发生
+        在 ``keyPressEvent`` **之前**——消费主体是"当前有焦点的控件"：焦点
+        在画面时由 :meth:`ScreenView.focusNextPrevChild` 拒掉（画面自身覆写），
+        焦点在工具栏/状态栏时则被那个控件直接吃掉，画面层覆写够不着。
+        本过滤器覆盖全窗控件树，三条件齐才拦：已连接 + 控制开启 + 事件对象
+        属本窗控件树。口令/设置/指纹对话框是**独立顶层窗**（不在本窗树内），
+        其 Tab 焦点导航不受影响；控制关闭时本窗导航亦如常。
+        """
+        if (
+            self._control_on
+            and self.state == ConnectionState.CONNECTED
+            and isinstance(event, QKeyEvent)
+            and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab)
+            and isinstance(obj, QWidget)
+            and (obj is self or self.isAncestorOf(obj))
+        ):
+            et = event.type()
+            if et == QEvent.Type.KeyPress:
+                self._controller_send_key(event, True)
+            elif et == QEvent.Type.KeyRelease:
+                self._controller_send_key(event, False)
+            return True
+        return super().eventFilter(obj, event)  # type: ignore[arg-type]
+
     # -- 关闭 -------------------------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt 覆写
         ensure_gui_thread("MainWindow.closeEvent")
+        # 走查第十批：先卸载应用级 Tab 守卫过滤器（与第六批 Bug5"先解绑
+        # 回调源"同纵深——窗口销毁后 QApplication 不得再回调本窗 Python 壳）。
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self._stop_ban_countdown(restore_button=False)
         self.clipboard.stop()
         self.status_bar.stop()

@@ -347,3 +347,119 @@ class TestBanCountdown:
         w._on_connect_success("9.9.9.9")  # noqa: SLF001
         assert not w._ban_timer.isActive()  # noqa: SLF001
         assert w._ban_remaining_s == 0  # noqa: SLF001
+
+
+class TestTabFocusGuard:
+    """走查第十批：控制模式下 Tab/Backtab 必须成对转发远端、禁本地焦点跳转。
+
+    病灶：Qt 在 ``QWidget::event()`` 把无修饰 Tab/Backtab 转成焦点导航，
+    发生在任何 ``keyPressEvent`` **之前**——第六批在 ScreenView.keyPressEvent
+    里 ``event.accept()`` 的注释断言"Tab 不再跳转"是误判（焦点在画面时事件
+    根本没走到那里）；第九批补的 MainWindow.keyPress/Release 覆写同样拦不住
+    （焦点在按钮时按钮先消费）。修复两层：
+    ① ``ScreenView.focusNextPrevChild`` 在控制态返回 False（焦点在画面时，
+    导航被拒后按键按普通键投递）；
+    ② 应用级 ``MainWindow.eventFilter`` 拦本窗控件树内 Tab/Backtab 成对转发
+    （焦点在工具栏等任意子控件时同样生效，且本地不再跳转）。
+
+    既有 ``test_click_grabs_focus_for_tab_win`` 为何没抓到：裸 ScreenView
+    单独成窗，焦点链里没有其他可聚焦控件，``focusNextPrevChild`` 天然失败、
+    事件回落 ``keyPressEvent`` → accept 生效 → 断言"能转发"通过；真实主窗
+    焦点链有工具栏，导航成功即消费，转发丢失。与第六批 argtypes 同类教训：
+    **哨兵必须跑在病灶场景的装配层**。
+    """
+
+    def _connected(self, qtbot):
+        from PySide6.QtTest import QTest
+
+        c = FakeController()
+        w = MainWindow(c, settings=None)
+        qtbot.addWidget(w)
+        w.show()
+        QTest.qWaitForWindowExposed(w)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        w.toolbar._control_btn.click()  # noqa: SLF001
+        return w, c
+
+    def test_tab_forwards_pair_screen_focus(self, qapp, qtbot) -> None:
+        """焦点在画面：Tab 成对转发，且焦点不跳到其他控件。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        w, c = self._connected(qtbot)
+        w.screen_view.setFocus()
+        qapp.processEvents()
+        c.keys.clear()
+        QTest.keyClick(w, Qt.Key.Key_Tab)
+        qapp.processEvents()
+        tab = int(Qt.Key.Key_Tab)
+        assert c.keys == [(tab, True), (tab, False)]  # 病灶：[]（被焦点链吃掉）
+        assert w.focusWidget() is w.screen_view  # 病灶：跳到工具栏按钮
+
+    def test_tab_forwards_pair_toolbar_focus(self, qapp, qtbot) -> None:
+        """焦点在工具栏：Tab 同样成对转发，不做本地导航（应用级过滤器覆盖）。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        w, c = self._connected(qtbot)
+        w.toolbar._control_btn.setFocus()
+        qapp.processEvents()
+        c.keys.clear()
+        before = w.focusWidget()
+        QTest.keyClick(w, Qt.Key.Key_Tab)
+        qapp.processEvents()
+        tab = int(Qt.Key.Key_Tab)
+        assert c.keys == [(tab, True), (tab, False)]
+        assert w.focusWidget() is before  # 病灶：焦点跳走且零转发
+
+    def test_shift_tab_forwards_pair(self, qapp, qtbot) -> None:
+        """Shift+Tab（Backtab）同口径：反向导航也留给远端。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        w, c = self._connected(qtbot)
+        w.screen_view.setFocus()
+        qapp.processEvents()
+        c.keys.clear()
+        QTest.keyClick(w, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
+        qapp.processEvents()
+        # offscreen/X11 平台 Shift+Tab 发的是 Key_Tab + Shift 修饰（非
+        # Key_Backtab），成对转发即正确：Shift 与 Tab 各有 press+release。
+        tab_codes = {int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)}
+        tabs = [k for k in c.keys if k[0] in tab_codes]
+        assert len(tabs) == 2 and (tabs[0][1], tabs[1][1]) == (True, False)
+        assert w.focusWidget() is w.screen_view  # 反向导航也未发生
+
+    def test_tab_navigates_normally_when_control_off(self, qapp, qtbot) -> None:
+        """控制关闭（未连接或开关关）：Tab 恢复本地焦点导航、零转发。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        w, c = self._connected(qtbot)
+        w.toolbar._control_btn.click()  # 关控制
+        qapp.processEvents()
+        c.keys.clear()
+        w.toolbar._control_btn.setFocus()
+        qapp.processEvents()
+        before = w.focusWidget()
+        QTest.keyClick(w, Qt.Key.Key_Tab)
+        qapp.processEvents()
+        assert c.keys == []  # 不转发
+        assert w.focusWidget() is not before  # 本地导航正常
+
+    def test_view_refuses_navigation_only_when_control_on(self, qapp, qtbot) -> None:
+        """视图覆写本体契约（不经事件派发，直调 focusNextPrevChild）。
+
+        组装场景里应用级过滤器在 notify 入口就吞掉 Tab 事件，
+        ScreenView.focusNextPrevChild 覆写实际不再触达；本用例直调探询，
+        锁定"控制开→拒导航、控制关→导航恢复"两分支（视图独立使用/无过滤器
+        装配时它是唯一防线）。
+        """
+        w, _ = self._connected(qtbot)
+        assert w.screen_view.focusNextPrevChild(True) is False  # 正向拒
+        assert w.screen_view.focusNextPrevChild(False) is False  # 反向拒
+        w.toolbar._control_btn.click()  # 关控制
+        qapp.processEvents()
+        w.screen_view.setFocus()
+        assert w.screen_view.focusNextPrevChild(True) is True  # 链内有目标
+        assert w.focusWidget() is not w.screen_view  # 焦点确实移走

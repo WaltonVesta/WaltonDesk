@@ -234,6 +234,20 @@ class ScreenView(QGraphicsView):
             return
         super().keyPressEvent(event)
 
+    def focusNextPrevChild(self, next: bool) -> bool:  # noqa: N802 - Qt 覆写签名
+        """走查第十批：控制开启时把 Tab/Backtab 留给远端，不做本地焦点跳转。
+
+        Qt 在 ``QWidget::event()`` 里把无修饰 Tab/Backtab 直接转成本方法，
+        **发生在 keyPressEvent 之前**——控件级 ``event.accept()`` 拦不住
+        （第六批误判：以为 accept 后事件不外溢，实测焦点仍跳、零转发）。
+        本覆写是病灶正解：返回 False 后 Qt 把按键继续按普通按键投递给
+        keyPressEvent → keyEvent 转发远端。判定用 ``_input_enabled`` 实时
+        读，与 :meth:`set_input_enabled` 同步，无需安装/卸载。
+        """
+        if self._input_enabled:
+            return False
+        return super().focusNextPrevChild(next)
+
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if self._input_enabled:
             self.keyEvent.emit(event.key(), False)
