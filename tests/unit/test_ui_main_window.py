@@ -64,7 +64,24 @@ class TestMainWindowInteractions:
         QTest.keyClick(w, Qt.Key.Key_F5)
         assert (Qt.Key.Key_F5, True) in c.keys
 
-    def test_key_press_ignored_when_not_connected(self, qapp, qtbot) -> None:
+    def test_connected_control_key_release_forwards(self, qapp, qtbot) -> None:
+        """走查第九批配套：窗口级按下/释放必须**成对**转发。
+
+        病灶：MainWindow 只覆写 keyPressEvent（press=True 单向），释放走
+        QWidget 默认实现被丢弃——焦点不在 ScreenView（如停在工具栏）时每个
+        键都"按下已转发、释放丢失"→ 被控端卡键。QTest.keyClick 天然发出
+        press+release 对，病灶态下 release 半边缺失即红。
+        """
+        w, c = self._win(qtbot)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        w.toolbar._control_btn.click()  # noqa: SLF001
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        QTest.keyClick(w, Qt.Key.Key_F5)
+        assert c.keys == [(Qt.Key.Key_F5, True), (Qt.Key.Key_F5, False)]
+
+    def test_key_release_ignored_when_not_connected(self, qapp, qtbot) -> None:
         w, c = self._win(qtbot)
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest

@@ -763,3 +763,117 @@ class TestUiProtocolAlignment:
                 "idle", "connecting", "authenticating",
                 "connected", "reconnecting", "disconnected",
             }
+
+
+class TestStickyKeyReconcile:
+    """走查第九批：Win 释放被系统吞掉后的粘滞热键对账（应急兜底）。
+
+    病灶（用户实测）：主机按两下 Win → 虚拟机 Win 永久"按住"（后续所有按键
+    变 Win+组合）。链路：Win 按下被 ScreenView.keyPressEvent 正常转发，
+    释放被 Windows 系统接管（开始菜单）后 Qt 收不到 keyReleaseEvent →
+    释放永不转发 → 被控端按住不放。兜底：按住超 ``_STICKY_HELD_TIMEOUT_S``
+    未见释放 → 下一次键事件出批前/冲刷环节拍主动补发一次 RELEASE。
+
+    哨兵直接以假时钟拨过阈值（零真实等待），并按出批消息序列断言；
+    病灶（无兜底）回退后本组"注入/解锁"类用例转红。
+    """
+
+    KEY_WIN = 0x01000022  # Qt Key_Meta → "win"（_QT_FUNCTION 表）
+    KEY_A = 0x41
+
+    async def _connected(self) -> tuple[cc.ClientController, FakeClock]:
+        ctl, clk = make_ctrl()
+        await connect_ok(ctl)
+        ctl.set_control_enabled(True)
+        return ctl, clk
+
+    async def test_win_press_then_fast_release_no_injection(self) -> None:
+        """未超阈值的正常短按：补发不得发生（注入只在超阈值时出现）。"""
+        ctl, clk = await self._connected()
+        ctl.send_key(self.KEY_WIN, True)
+        clk.advance(0.5)  # 500ms 后真实释放到达（焦点路径未丢的少数场景）
+        ctl.send_key(self.KEY_WIN, False)
+        ctl.flush_now()
+        await settle()
+        sent = FakeControl.instances[0].sent
+        assert [(m.action, m.key) for m in sent] == [
+            (KeyAction.PRESS, "win"),
+            (KeyAction.RELEASE, "win"),
+        ]
+        assert ctl._sticky_held == {}  # noqa: SLF001 - 销账
+
+    async def test_stuck_win_unlocked_by_next_key(self) -> None:
+        """建议 B 形态：释放丢失，用户敲下一个键 → 该键之前先补发 win 释放。"""
+        ctl, clk = await self._connected()
+        ctl.send_key(self.KEY_WIN, True)
+        ctl.flush_now()
+        await settle()
+        assert [(m.action, m.key) for m in FakeControl.instances[0].sent] == [
+            (KeyAction.PRESS, "win")
+        ]
+        FakeControl.instances[0].sent.clear()
+        clk.advance(cc._STICKY_HELD_TIMEOUT_S + 0.1)  # noqa: SLF001 - 超阈值
+        ctl.send_key(self.KEY_A, True)
+        ctl.flush_now()
+        await settle()
+        sent = FakeControl.instances[0].sent
+        assert [(m.action, m.key) for m in sent] == [
+            (KeyAction.RELEASE, "win"),  # 解锁注入，且严格先于新键
+            (KeyAction.PRESS, "a"),
+        ]
+        assert ctl._sticky_held == {}  # noqa: SLF001
+
+    async def test_stuck_win_unlocked_by_flush_loop_when_idle(self) -> None:
+        """建议 A 形态：用户不再敲任何键，冲刷环节拍同样完成解锁（静置自愈）。"""
+        ctl, clk = await self._connected()
+        ctl.send_key(self.KEY_WIN, True)
+        ctl.flush_now()
+        await settle()
+        FakeControl.instances[0].sent.clear()
+        clk.advance(cc._STICKY_HELD_TIMEOUT_S + 0.1)  # noqa: SLF001
+        # 直调对账+出批等价于冲刷环一次 tick（环体代码路径同两行）
+        ctl._reconcile_sticky_keys()  # noqa: SLF001
+        ctl.flush_now()
+        await settle()
+        sent = FakeControl.instances[0].sent
+        assert [(m.action, m.key) for m in sent] == [(KeyAction.RELEASE, "win")]
+        # 记账已清：第二次对账不再重复注入（每次按下至多补发一次）
+        FakeControl.instances[0].sent.clear()
+        clk.advance(5.0)
+        ctl._reconcile_sticky_keys()  # noqa: SLF001
+        ctl.flush_now()
+        await settle()
+        assert FakeControl.instances[0].sent == []
+
+    async def test_shift_long_hold_not_injected(self) -> None:
+        """监视集合只含 win：Shift 长按是合法用法（连续输入大写），不得误伤。"""
+        ctl, clk = await self._connected()
+        ctl.send_key(0x01000020, True)  # Qt Key_Shift → "shift"
+        clk.advance(cc._STICKY_HELD_TIMEOUT_S + 1.0)  # noqa: SLF001
+        ctl.send_key(self.KEY_A, True)
+        ctl.send_key(self.KEY_A, False)
+        ctl._reconcile_sticky_keys()  # noqa: SLF001
+        ctl.flush_now()
+        await settle()
+        sent = FakeControl.instances[0].sent
+        assert [(m.action, m.key) for m in sent] == [
+            (KeyAction.PRESS, "shift"),  # 无 shift 释放注入——正常长按合法
+            (KeyAction.PRESS, "a"),
+            (KeyAction.RELEASE, "a"),
+        ]
+
+    async def test_teardown_clears_sticky_bookkeeping(self) -> None:
+        """拆会话清账：陈旧记账不得跨重连残留（防向新会话补发无来源释放）。"""
+        ctl, clk = await self._connected()
+        ctl.send_key(self.KEY_WIN, True)
+        clk.advance(cc._STICKY_HELD_TIMEOUT_S + 0.1)  # noqa: SLF001
+        await ctl.disconnect()
+        assert ctl._sticky_held == {}  # noqa: SLF001
+
+    async def test_control_off_clears_sticky_bookkeeping(self) -> None:
+        """关控制清账：与 coalescer 缓冲同口径丢弃。"""
+        ctl, _ = await self._connected()
+        ctl.send_key(self.KEY_WIN, True)
+        assert ctl._sticky_held  # noqa: SLF001 - 按下已登记
+        ctl.set_control_enabled(False)
+        assert ctl._sticky_held == {}  # noqa: SLF001

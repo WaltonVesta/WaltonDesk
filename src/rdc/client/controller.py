@@ -100,6 +100,18 @@ ImageFactory = Callable[[int, int, Any], object]
 #: 口令再烧一次服务端失败计数，喂封禁窗口（2026-10-06 走查第四批缺陷 3）。
 _AUTH_CLASS_ERRORS: Final = (AuthError, TlsError, ConnectionError)
 
+#: 会被操作系统**吞掉释放事件**的热键（走查第九批，2026-10-17 用户实测）：
+#: Windows 按 Win 时由系统接管开始菜单，Qt 应用层收不到 keyReleaseEvent →
+#: 按下已转发、释放丢失 → 被控端 Win 永久按住，后续所有按键变 Win+组合。
+#: v5.0.0 应急兜底（完整解决=低级键盘钩子 WH_KEYBOARD_LL，记入 v5.1.0 特权
+#: 操作范围）：按住超过阈值仍未见释放 → 主动补发一次 RELEASE。
+#: **只监视 Win**：Shift/Alt/Ctrl 长按是合法用法（Shift 连续输入大写、
+#: AltGr 打字、Ctrl 游戏组合键），纳入监视会误伤——用户实测丢释放的仅 Win。
+_STICKY_WATCH_KEYS: Final = frozenset({"win"})
+#: 按住超过该秒数即判定"释放事件已被系统吞掉"。人类相邻按键间隔远小于
+#: 此值，正常长按（哪怕故意按住 Win 思考）最坏只多容忍 2s 即解锁。
+_STICKY_HELD_TIMEOUT_S: Final = 2.0
+
 
 def _default_image_factory(_width: int, _height: int, _arr: Any) -> object:
     raise ConnectionError(
@@ -178,6 +190,9 @@ class ClientController:
         # 命中后 connect 在弹口令框**前**即拒绝，用户不再白输口令。
         self._ban_until = 0.0
         self._ban_host = ""
+        # 粘滞热键记账（走查第九批）：键名 → 按下时刻（self._clock 口径）。
+        # 仅 _STICKY_WATCH_KEYS 成员会被登记；释放到达即销账。
+        self._sticky_held: dict[str, float] = {}
 
     # ================================================================== UI 契约
 
@@ -263,6 +278,9 @@ class ClientController:
         self._control_enabled = enabled
         if not enabled:
             self._coalescer.reset()
+            # 走查第九批：关控制=用户放弃转发，本地粘滞记账一并清掉
+            # （防 2s 后向新会话补发陈旧 RELEASE；被控端侧由断连 reset 兜底）。
+            self._sticky_held.clear()
 
     def send_mouse(self, action: str, x: int, y: int) -> None:
         """转发鼠标（ScreenView 载荷口径：``move``/``press:<btn>``/``wheel:<dir>``）。"""
@@ -283,6 +301,15 @@ class ClientController:
             # 键盘链路断点（哪些物理键没进值表）。
             _LOG.warning("send_key_unmapped_qt_code", qt_key=qt_key)
             return
+        # 走查第九批：本键出批前先对账粘滞热键——"下一个键到达"是释放
+        # 已被系统吞掉后最确定的解锁时机（建议 B 的确定性形态）。
+        self._reconcile_sticky_keys()
+        if press and name in _STICKY_WATCH_KEYS:
+            self._sticky_held[name] = self._clock()
+        elif not press and name in _STICKY_WATCH_KEYS:
+            # 正常释放到达（Qt 未丢，如焦点回窗口后的 keyReleaseEvent）：
+            # 已随下方 feed 转发，本地记账销账，不再补发。
+            self._sticky_held.pop(name, None)
         self._emit_batches(self._coalescer.feed_key(name, press))
 
     def send_text(self, text: str) -> None:
@@ -555,8 +582,29 @@ class ClientController:
                 await asyncio.sleep(delay if delay > 0 else 1.0 / 30.0)
             except asyncio.CancelledError:
                 raise
+            # 走查第九批：静置兜底——用户不再敲任何键时，按环节拍同样完成
+            # 粘滞热键对账（建议 A 的周期形态；打字场景由 send_key 即时对账）。
+            self._reconcile_sticky_keys()
             self._emit_batches(self._coalescer.poll())
             self._metrics_tick()
+
+    def _reconcile_sticky_keys(self) -> None:
+        """补发被操作系统吞掉的粘滞热键释放（走查第九批应急兜底）。
+
+        按住超过 :data:`_STICKY_HELD_TIMEOUT_S` 仍未收到释放（Win 键场景：
+        系统接管开始菜单后 Qt 收不到 keyReleaseEvent，释放永远不会到）→
+        主动喂一条 KEY_RELEASE 解锁被控端，并落本地记账（防每个后续键重复
+        补发）。用户真实释放若在其后到达（少数焦点路径仍会送达），多补一次
+        释放对被控端幂等无害；记账已清，不会三次补发。
+        """
+        if not self._sticky_held:
+            return
+        now = self._clock()
+        stale = [k for k, t in self._sticky_held.items() if now - t >= _STICKY_HELD_TIMEOUT_S]
+        for key in stale:
+            del self._sticky_held[key]
+            _LOG.warning("sticky_key_release_injected", key=key)
+            self._emit_batches(self._coalescer.feed_key(key, False))
 
     # ================================================================== 指标
 
@@ -722,6 +770,9 @@ class ClientController:
         self._control = None
         self._screen = None
         self._coalescer.reset()
+        # 走查第九批：会话已拆，本地粘滞热键记账一并作废（被控端复位由
+        # 服务端 reset 链路负责；留着会在重连后补发陈旧 RELEASE）。
+        self._sticky_held.clear()
         self._h264_decoder = None
         self._last_frame_at = None
         self._measured_fps = 0.0

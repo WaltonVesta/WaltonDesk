@@ -556,13 +556,23 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt 覆写
         if self.state == ConnectionState.CONNECTED and self._control_on:
             # 控制态：窗口级按键也转发（输入框等例外由 Qt focus 先消费）
-            self._controller_send_key(event)
+            self._controller_send_key(event, True)
             return
         super().keyPressEvent(event)
 
-    def _controller_send_key(self, event: QKeyEvent) -> None:
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt 覆写
+        # 走查第九批配套：窗口级此前只转 press 不转 release（无本覆写，
+        # 释放走 QWidget 默认实现被丢）——焦点恰不在 ScreenView（如停在
+        # 工具栏）时每个键都"按下已转发、释放丢失"→ 被控端卡键。与
+        # keyPressEvent 对称转发；粘滞热键兜底另有 controller 层对账。
+        if self.state == ConnectionState.CONNECTED and self._control_on:
+            self._controller_send_key(event, False)
+            return
+        super().keyReleaseEvent(event)
+
+    def _controller_send_key(self, event: QKeyEvent, press: bool) -> None:
         if self._controller is not None:
-            self._controller.send_key(event.key(), True)
+            self._controller.send_key(event.key(), press)
 
     # -- 关闭 -------------------------------------------------------------------
 
