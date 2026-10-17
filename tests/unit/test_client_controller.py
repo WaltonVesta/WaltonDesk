@@ -623,6 +623,45 @@ class TestFramePipeline:
         assert len(got) == 4
         assert got[0] == (64, 48, (48, 64, 3))
 
+    async def test_h264_size_change_decodes_on_same_decoder(self) -> None:
+        """走查第十一批装配锁定：被控端改分辨率后，长期解码器不重建即可出帧。
+
+        探针实测：编码器尺寸重建后的首帧 IDR **in-band 自带新 SPS/PPS**
+        （nal 序列 [7,8,6,...]），FFmpeg 解码器收到即自适应切尺寸。本用例
+        把该语义固化进测试——若未来有人给 controller 加"分辨率变化就重建
+        解码器"或"丢弃新尺寸帧"的逻辑，此处即红。
+        """
+        from rdc.encoding.h264 import H264Encoder
+
+        enc = H264Encoder(64, 48)
+        made = []
+        # 旧尺寸两帧（IDR+delta）→ 新尺寸两帧（encode 内自动跟随重建，再 IDR+delta）
+        for h, w in ((48, 64), (32, 48)):
+            for i in range(2):
+                arr = np.full((h, w, 4), (i + 1) * 60, dtype=np.uint8)
+                arr[:, :, 3] = 255
+                made.append(enc.encode(arr))
+        enc.close()
+        assert made[2].width == 48 and made[2].height == 32  # 编码器确已跟随
+
+        got: list[object] = []
+        ctl, _ = make_ctrl(image_factory=lambda w, h, arr: (w, h, arr.shape))
+        ctl.set_events(SimpleNamespace(frame_arrived=lambda img, **kw: got.append(img)))
+        await connect_ok(ctl)
+        dec_mid = None
+        for i, ef in enumerate(made):
+            ctl._handle_screen_frame(  # noqa: SLF001
+                ScreenFrame(seq=i, timestamp=0.0, width=ef.width, height=ef.height,
+                            codec=Codec.H264, data=ef.data, keyframe=ef.is_keyframe)
+            )
+            if i == 1:
+                dec_mid = ctl._h264_decoder  # noqa: SLF001
+        assert got == [
+            (64, 48, (48, 64, 3)), (64, 48, (48, 64, 3)),
+            (48, 32, (32, 48, 3)), (48, 32, (32, 48, 3)),
+        ], "新尺寸帧必须直接可解（in-band SPS/PPS 自适应）"
+        assert ctl._h264_decoder is dec_mid  # noqa: SLF001 - 全程同一解码器
+
     async def test_decode_failure_isolated(self) -> None:
         ctl, _ = make_ctrl()
         await connect_ok(ctl)

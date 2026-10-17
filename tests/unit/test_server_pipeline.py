@@ -427,6 +427,68 @@ class TestOddResolutionEndToEnd:
         pipe.close()
 
 
+class _SizingSource:
+    """采集源替身：第 switch_after 帧起**换尺寸**（模拟被控端运行中改分辨率）。
+
+    ArrayScreenSource 强制全序列同尺寸（测试替身的构造期校验），动态分辨率
+    需要的是"序列中途变尺寸"，故独立小替身：capture() 返回新形状的
+    CaptureFrame，其余协议成员透传内层（同 :class:`_FlakySource` 模式）。
+    """
+
+    def __init__(self, big: list[np.ndarray], small: list[np.ndarray], *, switch_after: int) -> None:
+        from rdc.capture.source import ArrayScreenSource
+
+        self._big = ArrayScreenSource(big)
+        self._small = ArrayScreenSource(small)
+        self._switch_after = switch_after
+        self._n = 0
+
+    def capture(self):  # noqa: ANN201 - 返回内层 CaptureFrame
+        self._n += 1
+        src = self._small if self._n > self._switch_after else self._big
+        return src.capture()
+
+    def __getattr__(self, name: str):  # noqa: ANN201 - 协议其余成员透传
+        return getattr(self._big, name)
+
+
+class TestDynamicResolutionEndToEnd:
+    """走查第十一批端到端：源尺寸突变 → 编码器跟随 + 新尺寸关键帧。
+
+    采集层病灶（region 过期、帧尺寸卡旧值）由 test_capture_mss 的
+    ``TestDynamicGeometry`` 锁定；本类锁定**修复生效后的下游链**——一旦
+    采集层交出尺寸不同的新帧，管线必须自动发新尺寸 IDR（用户期望"全链
+    无感跟随"的两段证明各测一段，装配语义完整覆盖）。
+    """
+
+    async def test_size_change_publishes_new_size_keyframe(self) -> None:
+        from rdc.encoding.h264 import H264Encoder
+
+        bc = RecordingBroadcaster()
+        big = make_source_frames(2, h=64, w=96)
+        small = make_source_frames(2, h=32, w=48)
+        src = _SizingSource(big, small, switch_after=1)
+        # 真实编码器：走"encode 内自动跟随重建"分支（替身测不到重建语义）
+        enc = H264Encoder(96, 64)
+        pipe = ScreenPipeline(
+            src,  # type: ignore[arg-type]
+            encoder_factory=lambda w_, h_: enc,
+            broadcaster=bc,  # type: ignore[arg-type]
+            framerate=FramerateController(clock=FakeClock()),
+        )
+        await pipe.run_once()  # 帧1：96x64 IDR
+        await pipe.run_once()  # 帧2：尺寸突变
+        m1, m2 = bc.frames[0], bc.frames[1]
+        assert (m1.width, m1.height) == (96, 64)
+        assert (m2.width, m2.height) == (48, 32), "尺寸未跟随（编码器未重建）"
+        assert m2.keyframe, "重建后首帧必须是 IDR，否则主控端花屏"
+        assert m2.data, "IDR 载荷非空"
+        # 跟随分支：同一实例内部重建，非 pipeline 新建替换（close 后 encoder 归 None，须在 close 前断言）
+        assert enc is pipe.encoder
+        pipe.close()
+        enc.close()
+
+
 # ---------------------------------------------------------------------------
 # 走查第六批 P0：采集失败退避不崩 + 停滞边沿回调（安全桌面自愈）
 # ---------------------------------------------------------------------------

@@ -337,6 +337,36 @@ class TestScreenView:
         v.set_fit_mode(False)
         assert v.transform().m11() == 1.0
 
+    def test_resolution_change_recrops_scene_and_refits(self, qapp, qtbot) -> None:
+        """走查第十一批：帧尺寸突变 → sceneRect/远端尺寸/缩放全部跟随。
+
+        采集层修复（region 新鲜化）后，主控端会收到尺寸不同的新帧。本用例
+        锁定 UI 层跟随语义：present_image 的 size_changed 分支——sceneRect
+        重设 + fitInView 重算 + remote_pos 按新几何换算（旧病灶若复发=
+        收到旧尺寸帧，此处前置断言即红）。
+        """
+        v = self._shown(qtbot)
+        qtbot.addWidget(v)
+        v.set_input_enabled(True)
+        v.present_image(QImage(200, 100, QImage.Format.Format_RGB32), left=0, top=0)
+        s_old = v.scene().sceneRect()
+        assert (s_old.width(), s_old.height()) == (200, 100)
+        scale_before = v.transform().m11()
+
+        # 被控端改分辨率：新帧 100x50
+        v.present_image(QImage(100, 50, QImage.Format.Format_RGB32), left=0, top=0)
+        s_new = v.scene().sceneRect()
+        assert (s_new.width(), s_new.height()) == (100, 50), "sceneRect 未跟随新尺寸"
+        assert v._remote_size == (100, 50)  # noqa: SLF001
+        # fit 视口不变、场景减半 → 缩放因子翻倍（fitInView 确实重算过）
+        assert v.transform().m11() > scale_before * 1.5
+
+        # 新几何坐标换算正确：视口中心映射到远端帧内部（不再按旧 200x100 越界拒绝）
+        vp = QPoint(int(v.viewport().width() // 2), int(v.viewport().height() // 2))
+        assert v.remote_pos(vp) is not None
+        v.set_fit_mode(False)
+        assert v.remote_pos(QPoint(10, 10)) is not None
+
     def test_worker_blocked(self, qapp, qtbot) -> None:
         v = self._shown(qtbot)
         qtbot.addWidget(v)

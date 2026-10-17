@@ -314,3 +314,175 @@ class TestHandleRebuild:
         assert frame.size == (640, 240)
         assert calls["n"] == 2
         src.close()
+
+
+class TestVirtualDesktopProbe:
+    """虚拟桌面几何探针 :func:`virtual_desktop_bounds`（走查第十一批）。"""
+
+    def test_returns_bounds_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ctypes
+        import sys
+
+        table = {76: -320, 77: 0, 78: 2240, 79: 1080}
+        monkeypatch.setattr(
+            ctypes, "windll",
+            types.SimpleNamespace(user32=types.SimpleNamespace(
+                GetSystemMetrics=lambda i: table[i]
+            )),
+        )
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert mss_module.virtual_desktop_bounds() == (-320, 0, 2240, 1080)
+
+    def test_non_windows_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert mss_module.virtual_desktop_bounds() is None
+
+    def test_degenerate_metrics_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 全零度量（无桌面会话/异常环境）→ None 停用，不得返回非法几何
+        import ctypes
+        import sys
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            ctypes, "windll",
+            types.SimpleNamespace(user32=types.SimpleNamespace(
+                GetSystemMetrics=lambda i: 0
+            )),
+        )
+        assert mss_module.virtual_desktop_bounds() is None
+
+
+class TestDynamicGeometry:
+    """动态分辨率自适应（走查第十一批病灶哨兵）。
+
+    病灶：被控端运行中改分辨率，``MonitorSelector`` 几何（构造期快照）与
+    mss ``.monitors``（缓存属性）双双过期，``capture()`` 永远按**旧 region**
+    抓屏 → 帧尺寸卡在旧分辨率，主控端画面不跟随（用户实测 1920→1280 无反应）。
+    既有 ``test_resolution_change_reallocates`` 用 ``force_size``（回传≠请求）
+    模拟，恰好绕过真病灶——真实 mss 按旧 region 返回旧尺寸，校验不触发。
+
+    修复：采集入口比对 ``geometry_probe``（SM 虚拟桌面包络，与 mss 枚举
+    同源 76-79）与构造期基线，不等 → 复用 :meth:`_rebuild_backend`（新句柄
+    首次枚举天然新鲜，绕开缓存）→ 本帧即用新几何。
+    """
+
+    #: 缩小后的布局：两块 320x180（模拟 1920→1280 式的运行中改分辨率）
+    _V_SM = {"left": 0, "top": 0, "width": 640, "height": 180}
+    _M1_SM = {"left": 0, "top": 0, "width": 320, "height": 180,
+              "is_primary": True, "name": "FAKE-1", "unique_id": "id-1"}
+    _M2_SM = {"left": 320, "top": 0, "width": 320, "height": 180,
+              "is_primary": False, "name": "FAKE-2", "unique_id": "id-2"}
+
+    @pytest.fixture
+    def dyn_backend(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """可"改 OS 布局"的假后端：新 MSS 实例在**构造时刻**读取实时布局。
+
+        与 mss 真实语义一致：新句柄首次 ``.monitors`` 枚举是新鲜的；
+        ``layout`` 键模拟用户改分辨率，``probe`` 键是探针读到的 SM 包络。
+        """
+        created: dict[str, Any] = {
+            "layout": [_VIRTUAL, dict(_MON1), dict(_MON2)],
+            "probe": (0, 0, 640, 240),
+            "count": 0,
+        }
+
+        def _ctor() -> FakeMSS:
+            backend = FakeMSS()
+            backend.monitors = [dict(m) for m in created["layout"]]
+            created["backend"] = backend
+            created["count"] += 1
+            return backend
+
+        def _forbidden(*a: Any, **k: Any) -> Any:  # 硬约束 ①
+            raise AssertionError("禁止调用已废弃的 mss.mss()")
+
+        monkeypatch.setattr(
+            mss_module, "mss", types.SimpleNamespace(MSS=_ctor, mss=_forbidden)
+        )
+        created["make_source"] = lambda **kw: MssScreenSource(
+            geometry_probe=lambda: created["probe"], **kw
+        )
+        return created
+
+    @staticmethod
+    def _shrink(created: dict[str, Any]) -> None:
+        created["layout"] = [TestDynamicGeometry._V_SM,
+                             dict(TestDynamicGeometry._M1_SM),
+                             dict(TestDynamicGeometry._M2_SM)]
+        created["probe"] = (0, 0, 640, 180)
+
+    def test_no_probe_keeps_lesion_behavior(self, dyn_backend: dict[str, Any]) -> None:
+        """病灶锁定（修复前后都绿的基线对照）：不注入探针=原行为——布局
+        已变仍按**旧 region** 抓屏。第十一批"为什么单测没抓到"的另一半：
+        病灶测试必须能在无探针世界复现，才能证明探针路径是真修复。"""
+        src = MssScreenSource()  # 默认 geometry_probe=None
+        self._shrink(dyn_backend)
+        frame = src.capture()
+        assert frame.size == (640, 240)  # 病灶：卡在旧尺寸
+        assert dyn_backend["backend"].grab_regions[-1]["height"] == 240
+        src.close()
+
+    def test_geometry_change_rebuilds_and_follows(self, dyn_backend: dict[str, Any]) -> None:
+        """探针检出包络变化 → 重建 → 本帧即用新几何（新 region/新尺寸/新枚举）。"""
+        src = dyn_backend["make_source"]()
+        src.capture()  # 基线帧
+        assert dyn_backend["count"] == 1
+        self._shrink(dyn_backend)
+        frame = src.capture()
+        assert dyn_backend["count"] == 2, "应重建 MSS 句柄"
+        assert frame.size == (640, 180)
+        assert src.frame_size == (640, 180)
+        assert dyn_backend["backend"].grab_regions[-1] == {
+            "left": 0, "top": 0, "width": 640, "height": 180
+        }
+        src.close()
+
+    def test_probe_none_disables_check(self, dyn_backend: dict[str, Any]) -> None:
+        """探针返回 None（非 Windows/极端环境）→ 检测停用、绝不报错、不重建。"""
+        created = dyn_backend
+        src = dyn_backend["make_source"]()
+        self._shrink(created)
+        created["probe"] = None  # 布局已变但探针不可用：停用检测（须在 shrink 后）
+        frame = src.capture()
+        assert created["count"] == 1  # 未重建（停用）
+        assert frame.size == (640, 240)  # 行为与修复前一致
+        src.close()
+
+    def test_cooldown_limits_rebuild_rate(self, dyn_backend: dict[str, Any]) -> None:
+        """冷却内几何再变不重复重建（防病态驱动横跳抖动句柄）。"""
+        created = dyn_backend
+        src = dyn_backend["make_source"](geometry_cooldown_s=100.0)
+        self._shrink(created)
+        src.capture()  # 第 1 次变化 → 重建
+        assert created["count"] == 2
+        # 第二次变化（布局再改回 240）：冷却未过 → 跳过重建
+        created["layout"] = [_VIRTUAL, dict(_MON1), dict(_MON2)]
+        created["probe"] = (0, 0, 640, 240)
+        src.capture()
+        assert created["count"] == 2, "冷却期内不得重复重建"
+        src.close()
+
+    def test_rebuild_preserves_selected_monitor(self, dyn_backend: dict[str, Any]) -> None:
+        """选屏语义延续：停在物理屏 1 时改分辨率，重建后仍采屏 1 的**新**几何。"""
+        src = dyn_backend["make_source"]()
+        src.set_monitor(1)
+        self._shrink(dyn_backend)
+        frame = src.capture()
+        assert frame.size == (320, 180)
+        assert frame.monitor_index == 1
+        assert dyn_backend["backend"].grab_regions[-1] == {
+            "left": 0, "top": 0, "width": 320, "height": 180
+        }
+        src.close()
+
+    def test_capture_into_also_follows_geometry(self, dyn_backend: dict[str, Any]) -> None:
+        """capture_into 同挂检测：尺寸对齐后新 dst 可用（旧行为按旧 info 必拒）。"""
+        src = dyn_backend["make_source"]()
+        self._shrink(dyn_backend)
+        dst = np.zeros((180, 640, 4), dtype=np.uint8)  # 新几何的 dst
+        frame = src.capture_into(dst)
+        assert frame.data is dst
+        assert frame.size == (640, 180)
+        src.close()

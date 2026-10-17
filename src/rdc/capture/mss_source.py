@@ -30,9 +30,11 @@ v4 实现的问题与本模块的对应决策：
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import time
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, Final
 
 import mss
 import numpy as np
@@ -50,9 +52,49 @@ from rdc.logging import get_logger
 
 __all__ = [
     "MssScreenSource",
+    "virtual_desktop_bounds",
 ]
 
 _LOG = get_logger("capture.mss_source")
+
+#: Windows 虚拟桌面 SM_* 索引（GetSystemMetrics）——与 input/windows.py 同源。
+_SM_XVIRTUALSCREEN: Final = 76
+_SM_YVIRTUALSCREEN: Final = 77
+_SM_CXVIRTUALSCREEN: Final = 78
+_SM_CYVIRTUALSCREEN: Final = 79
+
+#: 几何变化检测冷却（秒）：分辨率抖动（反复横跳的病态驱动）下，两次重建
+#: 至少间隔此值，避免每帧重建 MSS 句柄。人类改分辨率是秒级低频动作，
+#: 冷却期内最多延迟这么久才自适应。
+_GEOMETRY_COOLDOWN_S: Final = 2.0
+
+
+def virtual_desktop_bounds() -> tuple[int, int, int, int] | None:
+    """Windows 虚拟桌面包络 ``(left, top, width, height)``。
+
+    用途（走查第十一批）：被控端运行中改分辨率时，``MonitorSelector`` 的
+    几何与 mss ``.monitors`` 属性都是**缓存值**（mss 源码实测：仅 ``None``
+    时才真枚举），``capture()`` 每帧按过期 region 抓屏 → 帧尺寸永远停在
+    旧分辨率，主控端画面不跟随。本探针 4 次 ``GetSystemMetrics``（微秒级）
+    给出新鲜包络，变化即触发采集源重枚举。
+
+    非 Windows / 任何失败返回 ``None``——探针只做辅助（与桌面探针
+    :mod:`rdc.capture.desktop` 同一"绝不引入新故障面"口径）：``None`` 时
+    采集路径完全退回原行为，不报错也不改变语义。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        left = int(user32.GetSystemMetrics(_SM_XVIRTUALSCREEN))
+        top = int(user32.GetSystemMetrics(_SM_YVIRTUALSCREEN))
+        width = int(user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN))
+        height = int(user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN))
+    except (AttributeError, OSError, ValueError):  # pragma: no cover - 极端精简 Windows
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return (left, top, width, height)
 
 
 class MssScreenSource:
@@ -77,10 +119,20 @@ class MssScreenSource:
         *,
         monitor_index: int = VIRTUAL_SCREEN_INDEX,
         buffer_count: int = 2,
+        geometry_probe: Callable[[], tuple[int, int, int, int] | None] | None = None,
+        geometry_cooldown_s: float = _GEOMETRY_COOLDOWN_S,
     ) -> None:
         if buffer_count < 1:
             raise ValueError(f"buffer_count 必须 ≥1，实得 {buffer_count}")
         self._buffer_count = buffer_count
+        #: 分辨率动态自适应（走查第十一批）：几何探针（新鲜虚拟桌面包络 vs
+        #: 选择器缓存值，不等即重建）。``None``=停用检测（行为与修复前一致
+        #: ——单元测试注入假后端，几何比对真 API 会污染，故生产接线由
+        #: service 显式传 :func:`_virtual_desktop_bounds`）。
+        self._geometry_probe = geometry_probe
+        self._geometry_cooldown_s = geometry_cooldown_s
+        self._geometry_last_rebuild = 0.0
+        self._geometry_baseline: tuple[int, int, int, int] | None = None
         self._buffers: list[npt.NDArray[np.uint8]] = []
         self._write_idx = 0
         self._seq = 0
@@ -107,6 +159,10 @@ class MssScreenSource:
             self._dispose_backend()
             raise ScreenCaptureError("没有可用显示器") from exc
         self._closed = False
+        # 几何基线=构造期探针值（与探测同一坐标空间，纯"探针漂移检测"；
+        # 探针不可用（None，如非 Windows/假后端桩返回 None）则整体停用）
+        if self._geometry_probe is not None:
+            self._geometry_baseline = self._geometry_probe()
 
     # -- ScreenSource 协议实现 -------------------------------------------------
 
@@ -126,6 +182,7 @@ class MssScreenSource:
             ScreenCaptureError: 已关闭、grab 失败或回传尺寸异常。
         """
         self._check_open()
+        self._check_geometry()  # 第十一批：分辨率动态自适应（region 过期即重建）
         info = self._selector.current
         t0 = time.perf_counter()
         view = self._grab_bgra(info)
@@ -149,6 +206,7 @@ class MssScreenSource:
             ScreenCaptureError: 同 :meth:`capture`。
         """
         self._check_open()
+        self._check_geometry()  # 第十一批：同 capture，先对齐几何再校验目标缓冲
         info = self._selector.current
         if destination.dtype != np.uint8:
             raise ValueError(f"目标缓冲 dtype 必须是 uint8，实得 {destination.dtype}")
@@ -305,6 +363,47 @@ class MssScreenSource:
             _LOG.error("屏幕采集失败", error=str(exc), monitor=info.index)
             self._rebuild_backend()
             raise ScreenCaptureError(f"屏幕采集失败: {exc}") from exc
+
+    def _check_geometry(self) -> None:
+        """虚拟桌面几何漂移检测 → 自动重枚举（走查第十一批动态分辨率）。
+
+        病灶：``MonitorSelector`` 几何是构造期快照、mss ``.monitors`` 又是
+        缓存属性，被控端运行中改分辨率后 ``capture()`` 按过期 region 抓屏，
+        帧尺寸永远停在旧值（1920→1280 画面"卡住"，升方向同样）。本检测每
+        采集帧一次：4 次 ``GetSystemMetrics``（微秒级）取**新鲜包络**与基线
+        比对，不等 → 复用句柄重建路径 :meth:`_rebuild_backend`（新 MSS()
+        的首次 monitors 枚举天然新鲜，顺带绕开缓存；保留选屏索引、该屏
+        消失时回退默认）→ 本帧即用新几何。
+
+        边界：
+        - 探针未注入 / 探针返回 None（非 Windows、极端精简系统）→ 停用；
+        - 冷却 :data:`_GEOMETRY_COOLDOWN_S`：病态驱动反复横跳时限制重建
+          频率（正常改分辨率一次即中，不受影响）；
+        - 重建失败**不更新基线** → 下一采集帧继续重试（自愈语义，同 P0 批
+          句柄重建；失败本身不在此抛错——region 即便过期 grab 也可能成功
+          返回旧尺寸帧，"画面短暂停留在旧分辨率"远好于炸采集链路）。
+        """
+        probe = self._geometry_probe
+        if probe is None:
+            return
+        fresh = probe()
+        if fresh is None:
+            return  # 探针平台不可用：本帧跳过，不做任何副作用
+        if fresh == self._geometry_baseline:
+            return
+        now = time.monotonic()
+        if now - self._geometry_last_rebuild < self._geometry_cooldown_s:
+            return
+        self._geometry_last_rebuild = now
+        _LOG.info(
+            "虚拟桌面几何变化，重建采集源",
+            old=self._geometry_baseline,
+            new=fresh,
+        )
+        self._rebuild_backend()
+        # 基线推进到本次探测值：即便重建内部回退/失败，也在冷却期内不再
+        # 抖动重试；真实仍不一致时冷却结束自然再触发（OS 包络是权威源）。
+        self._geometry_baseline = fresh
 
     def _rebuild_backend(self) -> None:
         """close 旧句柄并重建 ``MSS()``（句柄失效自愈，走查第六批 P0）。

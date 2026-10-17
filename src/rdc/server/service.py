@@ -42,7 +42,7 @@ from typing import Any
 
 from rdc.capture.desktop import is_secure_desktop
 from rdc.capture.framerate import FramerateController
-from rdc.capture.mss_source import MssScreenSource
+from rdc.capture.mss_source import MssScreenSource, virtual_desktop_bounds
 from rdc.capture.source import ScreenSource
 from rdc.config.paths import cert_dir, ensure_dirs
 from rdc.config.settings import Settings, current_settings
@@ -342,9 +342,15 @@ class HostService:
     # ================================================================== 采集/管线
 
     def _ensure_screen_source(self) -> None:
-        """生产采集源延后构造（测试注入则跳过）。"""
+        """生产采集源延后构造（测试注入则跳过）。
+
+        走查第十一批：动态分辨率自适应靠 ``geometry_probe``（虚拟桌面
+        GetSystemMetrics 包络）——选择器/mss 的几何都是缓存值，被控端运行
+        中改分辨率必须显式探测 OS 才能感知。探针失败/非 Windows 返回 None
+        即静默停用，绝不引入新故障面。
+        """
         if self._source is None:
-            self._source = MssScreenSource()
+            self._source = MssScreenSource(geometry_probe=virtual_desktop_bounds)
 
     def _ensure_pipeline(self) -> None:
         """按当前 settings 构造广播管线（rater 以队列/丢帧信号自适应）。"""
