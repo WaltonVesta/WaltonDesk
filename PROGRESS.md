@@ -1,6 +1,6 @@
 # PROGRESS.md — remote_desktop v5.0.0 重构进度
 
-> 最后更新：2026-10-17（阶段 9 ✅ 完成收口；真机走查进行中——八批 ❌ 项均已修复：六批 + 第六批复测回归 `333ab13`〔VkKeyScanW argtypes〕+ 第九批 `8fd2ab1`〔Win 键释放被系统吞掉 → 按住超 2s 自动补发释放；完整钩子方案归 v5.1.0，README 新增已知限制章节；复测通过：标点/Win/其余键盘全 ✅〕+ 第十批 `fd6d1ad`〔Tab/Backtab 被 Qt 焦点链在 keyPressEvent 之前消费致控制态泄漏 → ScreenView.focusNextPrevChild 覆写 + MainWindow 应用级守卫成对转发，清单新增 3.10 项〕，终态 1523 passed / 2 skipped 三绿退出码 0）
+> 最后更新：2026-10-17（阶段 9 ✅ 完成收口；真机走查进行中——九批 ❌ 项均已修复：六批 + 第六批复测回归 `333ab13`〔VkKeyScanW argtypes〕+ 第九批 `8fd2ab1`〔Win 键释放被系统吞掉 → 按住超 2s 自动补发释放；完整钩子方案归 v5.1.0，README 新增已知限制章节；复测通过：标点/Win/其余键盘全 ✅〕+ 第十批 `fd6d1ad`〔Tab/Backtab 被 Qt 焦点链在 keyPressEvent 之前消费致控制态泄漏 → ScreenView.focusNextPrevChild 覆写 + MainWindow 应用级守卫成对转发，清单新增 3.10 项〕+ 第十一批 `6f58c46`〔被控端运行中改分辨率画面不跟随：MonitorSelector/mss 双层几何缓存致 region 过期 → 采集层 SM 包络漂移检测自动重建采集源，全链无感跟随无需手动刷新，清单新增 4.7 项〕，终态 1535 passed / 2 skipped 三绿退出码 0）
 > 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md` / `STAGE9_REPORT.md`（阶段报告；阶段 8 延后未开）
 > 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）→ 阶段 9（`efd38a0` 任务书基线 → `188479d` 批0 → `44c3b2b` 批1 → `59b807c` 批2 → `f8ea292` 批3 → `f2ca14e`+`e7b6d9c` 批4 → `ab95509`/`12f6b7a`/`d07a79a`/`bfea86a`/`dde0b8a` 批5 → 收口）
 
