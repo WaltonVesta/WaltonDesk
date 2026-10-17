@@ -146,7 +146,13 @@ if sys.platform == "win32":  # pragma: no cover - 非 Windows 分支由 CI 矩�
     _user32.SendInput.restype = ctypes.c_uint
     _SendInput = _user32.SendInput
     _GetSystemMetrics = _user32.GetSystemMetrics
+    _GetSystemMetrics.argtypes = [ctypes.c_int]
+    _GetSystemMetrics.restype = ctypes.c_int
     _VkKeyScanW = _user32.VkKeyScanW
+    # 参数必须声明 c_wchar（按值传 UTF-16 WCHAR）：缺省 argtypes 时 ctypes 把 str
+    # 当 char*（ANSI 指针）传，与期望 WCHAR 错位 → 恒返回 -1（复测回归：标点全报
+    # "当前键盘布局无对应 VK"）。
+    _VkKeyScanW.argtypes = [ctypes.c_wchar]
     # SHORT 返回值必须声明 c_short：默认 c_int 会把寄存器高 16 位垃圾读进来，
     # 污染 scan 判定（走查第六批 Bug2：真实布局下标点全被误判"需 Shift 组合"）。
     _VkKeyScanW.restype = ctypes.c_short

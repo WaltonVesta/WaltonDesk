@@ -411,6 +411,61 @@ class TestKeyboard:
             pytest.skip("VkKeyScanW 仅在 Windows 存在")
         assert win_mod._VkKeyScanW.restype is ctypes.c_short
 
+    def test_vkkeyscanw_argtypes_declared(self) -> None:
+        """第六批复测回归根因锁定：``_VkKeyScanW.argtypes = [c_wchar]``。
+
+        restype 补了但 argtypes 漏了：ctypes 缺省把 ``str`` 当 ``char*``（ANSI
+        指针）传参，而 VkKeyScanW 期望**按值** WCHAR（UTF-16）→ 参数错位恒返回
+        -1 → 全部标点报"当前键盘布局无对应 VK"。用户实测对比：无 argtypes 得
+        -1，声明 c_wchar 后 ``'!'`` 得 0x0131。非 Windows 环境跳过。
+        """
+        import rdc.input.windows as win_mod
+
+        if win_mod._VkKeyScanW is None:  # pragma: no cover - 非 Windows 分支
+            pytest.skip("VkKeyScanW 仅在 Windows 存在")
+        assert win_mod._VkKeyScanW.argtypes == [ctypes.c_wchar]
+
+    def test_win32_api_declarations_complete(self) -> None:
+        """ctypes 声明审计哨兵：三个 user32 入口 argtypes/restype 均已声明。
+
+        复测病灶是"声明了一半"（restype 有、argtypes 无），单测打桩全绿也拦不住。
+        本条把 windows.py 装载区的全部 windll 函数纳入声明完整性断言，任何新增
+        入口未带 argtypes 都会在此转红。非 Windows 环境跳过。
+        """
+        import rdc.input.windows as win_mod
+
+        if not win_mod._HAS_WINAPI:  # pragma: no cover - 非 Windows 分支
+            pytest.skip("user32 入口仅在 Windows 存在")
+        assert list(win_mod._SendInput.argtypes) == [
+            ctypes.c_uint,
+            ctypes.POINTER(win_mod.INPUT),
+            ctypes.c_int,
+        ]
+        assert win_mod._SendInput.restype is ctypes.c_uint
+        assert win_mod._GetSystemMetrics.argtypes == [ctypes.c_int]
+        assert win_mod._GetSystemMetrics.restype is ctypes.c_int
+        assert win_mod._VkKeyScanW.argtypes == [ctypes.c_wchar]
+        assert win_mod._VkKeyScanW.restype is ctypes.c_short
+
+    def test_scan_char_real_call_resolves_punctuation(self) -> None:
+        """真机 ctypes 调用哨兵（决策点 1 的例外，用户复测后指定补测）。
+
+        不打桩 ``scan_char``，直接走真实 VkKeyScanW：``'!'`` 必须解析成功
+        （返回 > 0）。VkKeyScanW 是只读查询 API，不移动光标、不注入输入，
+        不违反"单测不打真机 SendInput"的决策点 1 本意；而正是这条通道在
+        复测中暴露了 argtypes 缺失——打桩测试永远测不到 ctypes 参数编组。
+        非 Windows 环境跳过。
+        """
+        import rdc.input.windows as win_mod
+
+        if win_mod._VkKeyScanW is None:  # pragma: no cover - 非 Windows 分支
+            pytest.skip("VkKeyScanW 仅在 Windows 存在")
+        # 未移位与移位标点各验一类：';' 低字节直通、'!' 需取基键。
+        assert win_mod._win_scan_char(";") > 0
+        assert win_mod._win_scan_char("!") > 0
+        # 基键一致性：'!' 与 shift 无关，scan & 0xFF 即基键，与 ';' 族同理。
+        assert win_mod._win_scan_char("!") & 0xFF == win_mod._win_scan_char("1") & 0xFF
+
     def test_unmappable_char_rejected(self, backend: WindowsBackend, rec: Recorder) -> None:
         with pytest.raises(InputControlError, match="无对应 VK"):
             backend.key_press("€")
