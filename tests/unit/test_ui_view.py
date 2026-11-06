@@ -261,6 +261,49 @@ class TestScreenView:
         assert got[-1][0].startswith("release:left")
         assert 0 <= got[0][1] < 640 and 0 <= got[0][2] < 480
 
+    def test_double_click_forwards_two_full_press_release_pairs(self, qapp, qtbot) -> None:
+        """走查第十二批 Bug 16：快速双击必须转发**两记完整** down/up。
+
+        病灶（修复前）：Qt 状态机把双击窗口内的第二次按下分发为
+        mouseDoubleClickEvent（不再走 mousePressEvent），本视图未覆写该事件
+        → 第二击的 press 永久丢失，远端只收到 down/up/up（孤立 release 不
+        成击），双击退化为单击——文件夹打不开。
+        断言口径：真实双击事件流 press→release→dbl→release，转发结果恰为
+        press/release/press/release 四事件成对有序。
+        """
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        v = self._shown(qtbot)
+        qtbot.addWidget(v)
+        v.present_image(QImage(640, 480, QImage.Format.Format_RGB32))
+        v.set_input_enabled(True)
+        got: list = []
+        v.mouseMoved.connect(lambda action, x, y: got.append(action))
+
+        vp = v.viewport()
+        pos = QPoint(50, 50)
+
+        def _send(et: QEvent.Type) -> None:
+            ev = QMouseEvent(
+                et,
+                pos.toPointF(),
+                vp.mapToGlobal(pos),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(vp, ev)
+
+        # 第一击（普通 press+release）
+        _send(QEvent.Type.MouseButtonPress)
+        _send(QEvent.Type.MouseButtonRelease)
+        # 第二击（双击窗口：Qt 分发 DblClick 而非 Press，随后仍发 Release）
+        _send(QEvent.Type.MouseButtonDblClick)
+        _send(QEvent.Type.MouseButtonRelease)
+        QTest.qWait(30)
+        assert got == ["press:left", "release:left", "press:left", "release:left"], got
+
     def test_keyboard_passthrough_when_enabled(self, qapp, qtbot) -> None:
         v = self._shown(qtbot)
         qtbot.addWidget(v)

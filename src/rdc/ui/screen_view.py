@@ -210,6 +210,27 @@ class ScreenView(QGraphicsView):
         self._emit(f"press:{btn}", event.position().toPoint())
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt 覆写
+        """走查第十二批 Bug 16：双击必须还原成"两击按下"转发远端。
+
+        病灶：Qt 状态机在双击窗口内把**第二次按下**分发为
+        ``mouseDoubleClickEvent``（实测 offscreen 探针：QTest.mouseDClick
+        只触发 dbl，不再触发 press），本视图此前没有覆写它——事件被
+        QGraphicsView 默认实现（转发到 scene/item）消费，**远端永远收不到
+        第二击的 press**。远端收到的序列是 down/up/（丢 down）/up：孤立
+        release 不成击，双击退化成单击，文件夹打不开。
+        修复：与 mousePressEvent 同语义转发 press（含抓焦），再交基类维持
+        Qt 侧选中态等默认行为。第二次 release 仍由 mouseReleaseEvent 正常
+        发出，远端得到完整 down/up/down/up。
+        """
+        btn = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right"}.get(
+            event.button(), "middle"
+        )
+        if self._input_enabled:
+            self.setFocus()
+            self._emit(f"press:{btn}", event.position().toPoint())
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         btn = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right"}.get(
             event.button(), "middle"

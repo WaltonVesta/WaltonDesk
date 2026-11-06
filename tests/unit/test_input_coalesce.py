@@ -176,6 +176,28 @@ class TestOrdering:
         batch = coalescer.drain(now=clock.now)
         assert len(batch) == 10
 
+    def test_double_click_across_cadence_batches_keeps_pair_order(
+        self, coalescer: InputCoalescer, clock: FakeClock
+    ) -> None:
+        """走查第十二批 Bug 16 排查项：节拍时间窗**只分批、不打散 down/up**。
+
+        双击两击落在相邻两个 33ms 出批窗口时，每批内 PRESS 必在 RELEASE
+        之前、批间全局 seq 单调递增，被控端按到达序注入即还原双击语义。
+        若未来把"同坐标 press/release 优化合并成一次 CLICK"，本哨兵转红。
+        """
+        coalescer.feed_mouse("press:left", 42, 42)
+        coalescer.feed_mouse("release:left", 42, 42)
+        assert coalescer.poll(now=clock.now) == []  # 未到点不出批
+        clock.advance(1 / 30 + 1e-6)
+        first = coalescer.poll(now=clock.now)
+        assert kinds(first) == [InputKind.PRESS, InputKind.RELEASE]
+        clock.advance(1 / 30 + 1e-6)
+        coalescer.feed_mouse("press:left", 42, 42)
+        coalescer.feed_mouse("release:left", 42, 42)
+        second = coalescer.poll(now=clock.now)
+        assert kinds(second) == [InputKind.PRESS, InputKind.RELEASE]
+        assert [e.seq for e in first + second] == [0, 1, 2, 3]
+
 
 # ---------------------------------------------------------------------------
 # 帧对齐 / 节拍
