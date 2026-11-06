@@ -175,7 +175,7 @@ def _run_gui_with(
     return int(loop.run_forever())
 
 
-def _print_host_banner(
+def _print_host_banner(  # nosec B107 -- first_run_password 形参默认空串是"非首启"哨兵，非硬编码口令
     service: object, settings: Settings, first_run_password: str = ""
 ) -> None:
     """控制台就绪提示（地址/端口/开关无敏感值；Feature 18 追加初始口令显眼回显）。

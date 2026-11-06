@@ -162,7 +162,7 @@ class TransportServer:
     # -- 生命周期 -------------------------------------------------------------
 
     #: 视为"全部接口"的绑定值（大小写不敏感匹配 strip 后）。
-    _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "*"})
+    _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "*"})  # nosec B104 -- 远程桌面产品语义：全接口/双栈默认监听，收紧入口见 Settings.bind_host（同带 B104 说明），非本层硬编码放行
 
     def _dualstack_sockets(self) -> list[socket.socket]:
         """为全接口绑定构造双栈监听 socket（走查第十三批 IPv6 兼容）。
