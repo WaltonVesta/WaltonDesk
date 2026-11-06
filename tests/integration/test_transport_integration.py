@@ -262,3 +262,138 @@ class TestStopOrdering:
             await ch.close()
             if server.listening:
                 await server.stop()
+
+
+def _free_port6() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+        s.bind(("::", 0))
+        return int(s.getsockname()[1])
+
+
+class TestDualstackListening:
+    """走查第十三批兼容性：全接口绑定（0.0.0.0）此前仅监听 IPv4。
+
+    真机现象：主控端输被控端 IPv6 地址（如 ``2409:8a55:...``）报"连接超时"
+    ——对端 socket 根本没在 v6 上监听。修复：``0.0.0.0`` / ``::`` / ``*``
+    一律优先建 ``AF_INET6 + IPV6_V6ONLY=0`` 双栈监听，v4 连接经 v4-mapped
+    一并接收；平台不支持双栈时回退旧 IPv4 路径（可观测）。
+    """
+
+    @staticmethod
+    def _dualstack_supported() -> bool:
+        import socket
+
+        try:
+            probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError:
+            return False
+        try:
+            probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            probe.bind(("::", 0))
+        except OSError:
+            return False
+        finally:
+            probe.close()
+        return True
+
+    async def _serve(self, certs) -> tuple:  # noqa: ANN001, ANN202
+        ctrl_port = _free_port6()
+        scr_port = _free_port6()
+        seen_ips: list[str] = []
+
+        async def on_control(session: ControlSession) -> None:
+            seen_ips.append(session.client_ip)
+            await session.next_message()
+
+        server = TransportServer(
+            host="0.0.0.0",
+            control_port=ctrl_port,
+            screen_port=scr_port,
+            cert_path=certs[0],
+            key_path=certs[1],
+            on_control_session=on_control,
+        )
+        await server.start()
+        return server, ctrl_port, seen_ips
+
+    async def test_v4_and_v6_both_connect(self, certs) -> None:  # noqa: ANN001
+        """同一双栈监听：127.0.0.1、::1、[::1] 三种写法都能建 TLS 会话。"""
+        if not self._dualstack_supported():
+            pytest.skip("本机不支持 IPv6 双栈监听（纯 v6 栈/禁用 v6）")
+        server, ctrl_port, seen_ips = await self._serve(certs)
+        try:
+            for target in ("127.0.0.1", "::1", "[::1]"):
+                ch = _control(target, ctrl_port, "")
+                await asyncio.wait_for(ch.connect(), timeout=5)
+                assert ch.is_connected, f"经 {target} 连接失败"
+                await ch.close()
+            assert server.listening
+        finally:
+            await server.stop()
+
+    async def test_v4_mapped_peer_normalized_to_v4(self, certs) -> None:
+        """v4 连接落到双栈监听：服务端看到的 client_ip 必须是裸 127.0.0.1。
+
+        v4-mapped 形态（``::ffff:127.0.0.1``）若不归一，黑白名单/封禁/限流
+        按 v4 配置的规则全部失配（同一台机器以两种身份记账），审计日志也
+        与用户预期对不上。
+        """
+        if not self._dualstack_supported():
+            pytest.skip("本机不支持 IPv6 双栈监听")
+        server, ctrl_port, seen_ips = await self._serve(certs)
+        try:
+            ch = _control("127.0.0.1", ctrl_port, "")
+            await asyncio.wait_for(ch.connect(), timeout=5)
+            await asyncio.sleep(0.2)  # 等 hook 记录
+            await ch.close()
+            assert seen_ips == ["127.0.0.1"], f"peer IP 未归一：{seen_ips}"
+        finally:
+            await server.stop()
+
+    async def test_explicit_v4_bind_stays_v4_only(self, certs) -> None:
+        """显式 bind_host=127.0.0.1 必须保持纯 v4（用户收紧语义不得被扩大）。"""
+        import socket
+
+        ctrl_port = _free_port()
+        scr_port = _free_port()
+        server = TransportServer(
+            host="127.0.0.1",
+            control_port=ctrl_port,
+            screen_port=scr_port,
+            cert_path=certs[0],
+            key_path=certs[1],
+            on_control_session=None,
+        )
+        await server.start()
+        try:
+            families = {s.family for lst in server._servers for s in lst.sockets}  # noqa: SLF001
+            assert families == {socket.AF_INET}, f"v4 绑定被扩为 {families}"
+        finally:
+            await server.stop()
+
+
+class TestNormalizePeerIp:
+    """_normalize_peer_ip 纯函数边界（双栈伴生逻辑，独立可测）。"""
+
+    def test_v4_mapped_forms(self) -> None:
+        from rdc.transport.server import _normalize_peer_ip
+
+        assert _normalize_peer_ip("::ffff:127.0.0.1") == "127.0.0.1"
+        assert _normalize_peer_ip("::ffff:192.168.1.50") == "192.168.1.50"
+        assert _normalize_peer_ip("::FFFF:1.2.3.4") == "1.2.3.4"  # 大小写不敏感
+
+    def test_real_v6_untouched(self) -> None:
+        from rdc.transport.server import _normalize_peer_ip
+
+        assert _normalize_peer_ip("::1") == "::1"
+        assert _normalize_peer_ip("2409:8a55:1234::5678") == "2409:8a55:1234::5678"
+        # 前缀形似但尾段非点分：原样返回（不误伤 ::ffff:1 这类压缩 v6 形态）
+        assert _normalize_peer_ip("::ffff:0:1") == "::ffff:0:1"
+
+    def test_empty_and_odd(self) -> None:
+        from rdc.transport.server import _normalize_peer_ip
+
+        assert _normalize_peer_ip("") == ""
+        assert _normalize_peer_ip("?") == "?"

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import socket
 from collections.abc import Awaitable, Callable
 from math import ceil
 from pathlib import Path
@@ -36,6 +37,21 @@ from rdc.transport.tls import build_server_ssl_context
 __all__ = ["ControlSession", "ScreenSession", "TransportServer"]
 
 _LOG = get_logger("transport.server")
+
+
+def _normalize_peer_ip(raw: str) -> str:
+    """v4-mapped IPv6 地址（``::ffff:127.0.0.1``）归一为裸 v4 点分。
+
+    走查第十三批 IPv6 兼容的必然配套：全接口改双栈监听后，IPv4 连接的
+    ``peername`` 会以 ``::ffff:x.x.x.x`` 形态出现。不归一的话，按 v4 配置的
+    黑白名单/封禁/限流全部失配（同一台机器以两种身份记账），审计日志也与
+    用户预期对不上。非 v4-mapped 形态（真实 v6 地址）原样返回。
+    """
+    if raw[:7].lower() == "::ffff:":
+        tail = raw[7:]
+        if "." in tail:  # v4-mapped 的尾段恒为点分十进制
+            return tail
+    return raw
 
 #: 会话建立回调：``async fn(session) -> None``；``session.next_message()`` 收到
 #: ``None``（对端关闭）时应尽快返回，:meth:`TransportServer.stop` 会兜底取消。
@@ -145,14 +161,80 @@ class TransportServer:
 
     # -- 生命周期 -------------------------------------------------------------
 
+    #: 视为"全部接口"的绑定值（大小写不敏感匹配 strip 后）。
+    _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "*"})
+
+    def _dualstack_sockets(self) -> list[socket.socket]:
+        """为全接口绑定构造双栈监听 socket（走查第十三批 IPv6 兼容）。
+
+        ``0.0.0.0`` 在 Windows/Linux 常规栈下**只监听 IPv4**（实测：主控端输
+        IPv6 地址连不上，报超时）。本方法建 ``AF_INET6 + IPV6_V6ONLY=0`` 的
+        双栈 socket 绑 ``::``——v4 连接经 v4-mapped 地址一并接收，v6 原生接
+        收。任一环节不支持（纯 v6 栈机器 / WSL 关 dualstack）返回空列表，
+        调用方回退常规 IPv4 路径（旧行为，可观测日志留痕）。
+        """
+        host = self._host.strip()
+        if host.lower() not in self._WILDCARD_HOSTS:
+            return []  # 显式单栈绑定（如 127.0.0.1）：尊重用户配置
+        try:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError as exc:
+            self._log.debug("dualstack_socket_unavailable", error=repr(exc))
+            return []
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            sock.bind(("::", 0))  # 端口占位探测双栈可用性（随即换目标端口）
+            sock.close()
+        except OSError as exc:
+            self._log.debug("dualstack_probe_failed", error=repr(exc))
+            sock.close()
+            return []
+        out: list[socket.socket] = []
+        try:
+            for port in (self._control_port, self._screen_port):
+                ls = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                ls.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                ls.bind(("::", port))
+                ls.listen(100)
+                ls.setblocking(False)
+                out.append(ls)
+        except OSError as exc:
+            for ls in out:
+                ls.close()
+            self._log.warning("dualstack_bind_failed_fallback_ipv4", error=repr(exc))
+            return []
+        return out
+
     async def start(self) -> None:
-        """开始监听两个端口（非阻塞；处理协程按连接派生并跟踪）。"""
-        ctrl = await asyncio.start_server(
-            self._dispatch(self._handle_control), self._host, self._control_port, ssl=self._ssl_ctx
-        )
-        scr = await asyncio.start_server(
-            self._dispatch(self._handle_screen), self._host, self._screen_port, ssl=self._ssl_ctx
-        )
+        """开始监听两个端口（非阻塞；处理协程按连接派生并跟踪）。
+
+        全接口绑定优先走双栈（IPv4+IPv6 同时可连，见
+        :meth:`_dualstack_sockets`）；其余绑定值走
+        :func:`asyncio.start_server` 原路径（host 含 ``:`` 时 asyncio 自动
+        按 AF_INET6 解析，IPv6 字面量绑定同样原生支持）。
+        """
+        dual = self._dualstack_sockets()
+        if dual:
+            ctrl = await asyncio.start_server(
+                self._dispatch(self._handle_control),
+                sock=dual[0],
+                ssl=self._ssl_ctx,
+            )
+            scr = await asyncio.start_server(
+                self._dispatch(self._handle_screen),
+                sock=dual[1],
+                ssl=self._ssl_ctx,
+            )
+            self._log.info("transport_server_dualstack")
+        else:
+            ctrl = await asyncio.start_server(
+                self._dispatch(self._handle_control), self._host, self._control_port, ssl=self._ssl_ctx
+            )
+            scr = await asyncio.start_server(
+                self._dispatch(self._handle_screen), self._host, self._screen_port, ssl=self._ssl_ctx
+            )
         self._servers = [ctrl, scr]
         self._log.info(
             "transport_server_started", control_port=self._control_port, screen_port=self._screen_port
@@ -264,7 +346,7 @@ class TransportServer:
     async def _handle_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """控制端口：TLS 已由 asyncio 完成 → 准入 → 认证握手 → 会话交付。"""
         peer = writer.get_extra_info("peername")
-        client_ip = str(peer[0]) if peer else "?"
+        client_ip = _normalize_peer_ip(str(peer[0])) if peer else "?"
         if not self._admit(client_ip):
             await self._reject_control(reader, writer, client_ip)
             return
@@ -307,7 +389,7 @@ class TransportServer:
     async def _handle_screen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """画面端口：TLS → 准入 → ``ScreenJoin`` 令牌消费 → 会话交付（broadcaster 注册点）。"""
         peer = writer.get_extra_info("peername")
-        client_ip = str(peer[0]) if peer else "?"
+        client_ip = _normalize_peer_ip(str(peer[0])) if peer else "?"
         if not self._admit(client_ip):
             writer.close()
             return

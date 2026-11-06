@@ -78,7 +78,7 @@ class Settings(BaseModel):
     screen_port_offset: int = 1
     # 被控端监听地址（阶段 9）：默认全部网卡（远程桌面产品语义）；
     # 收紧示例：127.0.0.1（本机调试）/ 指定内网地址。
-    bind_host: str = "0.0.0.0"  # nosec B104 -- 远程桌面产品语义：默认监听全部网卡；收紧示例见上行注释（127.0.0.1/内网地址）
+    bind_host: str = "0.0.0.0"  # nosec B104 -- 远程桌面产品语义：默认监听全部网卡（走查第十三批起双栈：v4+v6 同时可连）；收紧示例见上行注释（127.0.0.1/内网地址）
     max_connections: int = 10
     bandwidth_limit: int = 0  # KB/s，0=不限
     enable_compression: bool = True
