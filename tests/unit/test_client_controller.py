@@ -582,7 +582,7 @@ class TestInboundDispatch:
         ctl._on_control_message(  # noqa: SLF001
             HostStatus(code=HostStatusCode.SCREEN_STALLED, secure_desktop=True, detail="BitBlt")
         )
-        assert got == [{"stalled": True, "secure_desktop": True}]
+        assert got == [{"stalled": True, "secure_desktop": True, "paused": False}]
 
     async def test_host_status_ok_dispatch_recovery(self) -> None:
         ctl, _ = make_ctrl()
@@ -592,7 +592,21 @@ class TestInboundDispatch:
         )
         await connect_ok(ctl)
         ctl._on_control_message(HostStatus(code=HostStatusCode.OK))  # noqa: SLF001
-        assert got == [{"stalled": False, "secure_desktop": False}]
+        assert got == [{"stalled": False, "secure_desktop": False, "paused": False}]
+
+    async def test_host_status_paused_dispatched(self) -> None:
+        """走查第十二批 Bug 12：被控端托盘暂停 → PAUSED 下行原样派发。
+
+        主控端据此在 EOF/重连风暴之前拿到"对方已暂停"事实（UI 禁控+提示）。
+        """
+        ctl, _ = make_ctrl()
+        got: list[dict[str, object]] = []
+        ctl.set_events(SimpleNamespace(host_status=lambda **kw: got.append(kw)))
+        await connect_ok(ctl)
+        ctl._on_control_message(  # noqa: SLF001
+            HostStatus(code=HostStatusCode.PAUSED, detail="服务已暂停")
+        )
+        assert got == [{"stalled": False, "secure_desktop": False, "paused": True}]
 
     async def test_send_clipboard_outbound(self) -> None:
         ctl, _ = make_ctrl()

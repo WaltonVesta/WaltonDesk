@@ -218,6 +218,44 @@ class TestCapture:
         with pytest.raises(ScreenCaptureError, match="已关闭"):
             src.monitors()
 
+    def test_reopen_restores_capture_with_fresh_handle(
+        self, fake_backend: dict[str, Any]
+    ) -> None:
+        """走查第十二批 Bug 14/15：close→reopen 后必须能继续采集。
+
+        被控端 pause→resume 复用同一源实例：管线 close 连带关闭源，恢复时
+        若无 reopen，新管线每帧 capture 抛"已关闭"→画面永久卡在最后一帧。
+        断言：①reopen 后出帧正常；②走的是**新** MSS() 句柄（旧句柄已释放，
+        复用陈旧 GDI 句柄正是第六批 P0 病灶）；③未关闭时 reopen 幂等不重建。
+        """
+        src = MssScreenSource()
+        assert src.capture().size == (640, 240)
+        handles_before = fake_backend["count"]
+        old = fake_backend["backend"]
+        src.close()
+        assert old.closed  # 旧句柄已释放
+        with pytest.raises(ScreenCaptureError, match="已关闭"):
+            src.capture()
+        src.reopen()
+        frame = src.capture()  # 病灶：修复前此抛"已关闭"（无 reopen 面）
+        assert frame.size == (640, 240)
+        assert fake_backend["count"] == handles_before + 1
+        assert fake_backend["backend"] is not old
+        assert not fake_backend["backend"].closed
+        src.reopen()  # 未关闭 → 幂等，不再重建
+        assert fake_backend["count"] == handles_before + 1
+        src.close()
+
+    def test_reopen_preserves_selected_monitor(self, fake_backend: dict[str, Any]) -> None:
+        """reopen 重建句柄后保留选屏索引（与 P0 句柄自愈同语义）。"""
+        src = MssScreenSource()
+        src.set_monitor(2)
+        src.close()
+        src.reopen()
+        assert src.current_monitor.index == 2
+        assert src.capture().left == 320  # 第二块屏横排右半
+        src.close()
+
 
 class TestStatsAndSwitch:
     """统计与切屏。"""

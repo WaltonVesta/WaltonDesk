@@ -246,6 +246,11 @@ class ScreenSource(Protocol):
         """释放后端资源（幂等）。"""
         ...
 
+    # 可选扩展（非协议硬成员，装配层经 getattr 探测调用）：
+    #   ``reopen() -> None`` —— 重新打开已 close 的源。被控端 pause→resume
+    #   生命周期会关闭管线（连带关闭源）后复用同一源实例重启管线（走查
+    #   第十二批 Bug 14/15），无 reopen 的实现由装配层降级为重建源。
+
 
 class ArrayScreenSource:
     """用内存中的数组序列充当采集源（测试/基准专用）。
@@ -390,6 +395,11 @@ class ArrayScreenSource:
     def close(self) -> None:
         """标记关闭（幂等）；关闭后 :meth:`capture` 抛 ``RuntimeError``。"""
         self._closed = True
+
+    def reopen(self) -> None:
+        """重新打开（走查第十二批 Bug 14/15：被控端 pause→resume 复用同一
+        源实例，装配层 start() 经 getattr 探测调用本方法）。幂等。"""
+        self._closed = False
 
     # -- 测试专用附加面（不属于协议）------------------------------------------
 

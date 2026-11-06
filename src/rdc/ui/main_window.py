@@ -133,8 +133,9 @@ class ClientEvents(Protocol):
 
     def clipboard_from_remote(self, text: str) -> None: ...
 
-    def host_status(self, *, stalled: bool, secure_desktop: bool) -> None:
-        """服务端状态下行（走查第六批 P0）：画面停滞/恢复，含安全桌面归因。"""
+    def host_status(self, *, stalled: bool, secure_desktop: bool, paused: bool = False) -> None:
+        """服务端状态下行（走查第六批 P0）：画面停滞/恢复，含安全桌面归因；
+        走查第十二批 Bug 12 扩展 paused=被控端托盘暂停通知。"""
         ...
 
     def clipboard_image_from_remote(self, image: QImage) -> None:
@@ -340,14 +341,28 @@ class MainWindow(QMainWindow):
         if self._settings.enable_clipboard:
             self.clipboard.apply_remote(text)
 
-    def host_status(self, *, stalled: bool, secure_desktop: bool) -> None:
-        """ClientEvents：服务端画面停滞/恢复（走查第六批 P0，安全桌面提示）。
+    def host_status(self, *, stalled: bool, secure_desktop: bool, paused: bool = False) -> None:
+        """ClientEvents：服务端状态下行（走查第六批 P0 停滞 + 第十二批 Bug 12 暂停）。
 
-        停滞且探针判定安全桌面 → 提示"远端正在安全桌面（如 UAC 确认中），
-        画面暂停"；普通停滞 → 提示采集异常等待自愈；恢复 → 状态栏回常态。
+        - 暂停：被控端托盘点了"暂停"——明确提示"远端已暂停服务"，并**禁用
+          控制**（远端已不接收输入，不禁用会让用户白点还以为自己在操作对方
+          电脑）；
+        - 停滞且安全桌面 → "远端处于安全桌面（UAC 确认中），画面暂停"；
+        - 普通停滞 → 采集异常等待自愈；
+        - 恢复 → 状态栏回常态。
         """
         ensure_gui_thread("MainWindow.host_status")
         if not self._ui_alive():
+            return
+        if paused:
+            # 走第十二批 Bug 12：先关控制（经主窗口统一入口维护 _control_on
+            # 与控制器开关），再同步按钮勾选态与状态栏提示——按钮不同步的
+            # 话用户看到"禁用控制"仍勾着，与实际禁发输入的事实相矛盾。
+            self._on_control_toggled(False)
+            self.toolbar.set_control_state(False)
+            self.status_bar.set_status(
+                "远端已暂停服务（被控端托盘操作），恢复后重新连接即可继续", "warn"
+            )
             return
         if stalled:
             if secure_desktop:

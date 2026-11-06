@@ -283,6 +283,19 @@ class MssScreenSource:
         self._dispose_backend()
         self._buffers = []
 
+    def reopen(self) -> None:
+        """重新打开已关闭的采集源（走查第十二批 Bug 14/15：被控端
+        pause→resume 生命周期复用同一源实例）。
+
+        复用 :meth:`_rebuild_backend`（新 MSS() 句柄首次枚举天然新鲜，
+        与第六批 P0 句柄自愈、第十一批几何漂移重建同一路径），保留选屏
+        索引语义；重建失败留给下帧采集入口报错/自愈，本方法不抛。
+        """
+        if not self._closed:
+            return
+        self._rebuild_backend()
+        self._closed = False
+
     # -- 内部 -------------------------------------------------------------------
 
     def _check_open(self) -> None:

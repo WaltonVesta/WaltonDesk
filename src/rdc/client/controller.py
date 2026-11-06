@@ -454,7 +454,12 @@ class ClientController:
             self._dispatch_event("clipboard_from_remote", msg.text)
             return
         if isinstance(msg, HostStatus):
-            if msg.code is HostStatusCode.SCREEN_STALLED:
+            # 走查第十二批 Bug 12：被控端托盘暂停 → 服务端拆会话**前**下行
+            # PAUSED，本端在 EOF/重连风暴之前先拿到"对方已暂停"事实。
+            paused = msg.code is HostStatusCode.PAUSED
+            if paused:
+                _LOG.info("host_status_paused", detail=msg.detail)
+            elif msg.code is HostStatusCode.SCREEN_STALLED:
                 _LOG.warning(
                     "host_status_stalled",
                     secure_desktop=msg.secure_desktop,
@@ -463,8 +468,10 @@ class ClientController:
             else:
                 _LOG.info("host_status_ok")
             self._dispatch_event(
-                "host_status", stalled=msg.code is HostStatusCode.SCREEN_STALLED,
+                "host_status",
+                stalled=msg.code is HostStatusCode.SCREEN_STALLED,
                 secure_desktop=msg.secure_desktop,
+                paused=paused,
             )
             return
         _LOG.debug("control_unexpected_inbound", type=type(msg).__name__)

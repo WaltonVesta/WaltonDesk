@@ -383,6 +383,9 @@ class HostStatusCode(IntEnum):
 
     OK = 1
     SCREEN_STALLED = 2
+    #: 被控端被托盘暂停（走查第十二批 Bug 12：pause 拆会话**前**主动下行，
+    #: 主控端得到"对方已暂停服务"明确提示，而非无信息的静默 EOF）。
+    PAUSED = 3
 
 
 @dataclass(frozen=True)
@@ -390,7 +393,8 @@ class HostStatus:
     """服务端状态主动下行（S→C，控制端口；走查第六批 P0 画面停滞提示）。
 
     Attributes:
-        code: 状态码（OK=画面流正常/恢复；SCREEN_STALLED=连续采集失败）。
+        code: 状态码（OK=画面流正常/恢复；SCREEN_STALLED=连续采集失败；
+            PAUSED=被控端服务被暂停，走查第十二批 Bug 12）。
         secure_desktop: 停滞当下服务端桌面探针判定是否处于安全桌面
             （UAC 提权界面，普通用户态无法采集/注入）。
         detail: 人读诊断（最近一次采集错误原文），客户端仅记日志。

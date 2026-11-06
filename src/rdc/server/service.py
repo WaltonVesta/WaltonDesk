@@ -150,10 +150,15 @@ class HostService:
         self.pid_manager = PIDManager(_SERVER_NAME)
         self._server: TransportServer | None = None
         self._tokens = SessionTokenStore()
-        self._registry = SubscriptionRegistry(
-            on_new_subscriber=self._on_new_subscriber,
-            on_removed=self._on_subscriber_removed,
-        )
+        #: 画面订阅登记表（含其持有的 broadcaster）——**每个运行周期新建**
+        #: （走查第十二批 Bug 14/15 主导根因）：旧实现本表只在构造期建一次，
+        #: 而 pause/shutdown/restart 收尾必经 ``registry.shutdown()`` →
+        #: broadcaster ``_stopped=True`` 永久置位；resume/restart 走 start()
+        #: 复用同一张已停表 → 新画面订阅 ``register()`` 抛
+        #: "ScreenBroadcaster 已停止" → 服务端画面会话建立即失败关闭 →
+        #: 主控端只收到 screen EOF、画面永久卡在最后一帧（控制通道独立存活，
+        #: 故"控制恢复但画面不恢复"）。
+        self._registry: SubscriptionRegistry = self._new_registry()
         self._pipeline: ScreenPipeline | None = None
         self._stop_event: asyncio.Event | None = None
         self._pipeline_task: asyncio.Task[None] | None = None
@@ -168,6 +173,13 @@ class HostService:
         self._cert_bundle: UserCertBundle | None = None
 
     # ================================================================== 生命周期
+
+    def _new_registry(self) -> SubscriptionRegistry:
+        """构造全新的画面订阅登记表（含其持有的活跃 broadcaster）。"""
+        return SubscriptionRegistry(
+            on_new_subscriber=self._on_new_subscriber,
+            on_removed=self._on_subscriber_removed,
+        )
 
     async def start(self) -> bool:
         """启动服务（幂等；paused 态调用等同 :meth:`resume`）。
@@ -211,7 +223,23 @@ class HostService:
         self._paused = False
         self._start_time = time.time()
         self.pid_manager.write()
+        # 走查第十二批 Bug 14/15 主导根因修复：订阅登记表（连同其持有的
+        # broadcaster）**每个运行周期重建**。旧实现跨 pause/resume/restart
+        # 复用同一张表，而 _teardown_runtime 必经 registry.shutdown() →
+        # broadcaster._stopped 永久置位 → 恢复后新画面订阅 register() 抛
+        # RuntimeError → 画面会话建立即关 → 主控端"控制可用但画面卡在最后
+        # 一帧"。必须在新会话开闸（TransportServer 已启动）后、构造管线前
+        # 重建——管线注入的 broadcaster 与本表必须是同一实例。
+        self._registry = self._new_registry()
         self._ensure_screen_source()
+        # 走查第十二批 Bug 14/15：上一周期 pipeline.close() 连带关闭了采集源
+        # （pause→resume/restart 复用同一源实例），必须可逆重开，否则新管线
+        # 每帧 capture 抛 ScreenCaptureError 退避——"恢复/重启后画面卡死"的
+        # 第二病灶。无 reopen 面的替身源（单测自造对象）降级为不处理：
+        # 其行为与修复前一致，不引入新故障面。
+        reopen = getattr(self._source, "reopen", None)
+        if callable(reopen):
+            reopen()
         self._ensure_pipeline()
         self._stop_event = asyncio.Event()
         assert self._pipeline is not None and self._stop_event is not None  # nosec B101 -- 内部不变量：两件资源紧前构造
@@ -232,9 +260,29 @@ class HostService:
         """暂停：停止监听与推流，进程保留（v4 pause 语义，托盘菜单用）。"""
         if self._paused or self._server is None:
             return
+        # 走查第十二批 Bug 12：拆会话**前**先给全部控制会话下行 PAUSED 状态帧
+        # （并发、单会话限时 2s 隔离）。旧版 pause 静默关监听，主控端只看到
+        # EOF——画面卡住、无任何"对方已暂停"信息。
+        await self._broadcast_paused_notice()
         await self._teardown_runtime()
         self._paused = True
         _LOG.info("host_service_paused")
+
+    async def _broadcast_paused_notice(self, timeout_s: float = 2.0) -> None:
+        """向活动控制会话广播暂停状态（单会话失败隔离，不阻断暂停流程）。"""
+        status = HostStatus(code=HostStatusCode.PAUSED, detail="服务已暂停")
+
+        async def _one(session: ControlSession) -> None:
+            try:
+                await asyncio.wait_for(session.send(status), timeout=timeout_s)
+            except Exception as exc:  # noqa: BLE001 - 通知失败只降级记录（会话本就要被拆除）
+                _LOG.warning(
+                    "paused_notice_send_failed", client=session.client_ip, error=repr(exc)
+                )
+
+        sessions = list(self._control_sessions)
+        if sessions:
+            await asyncio.gather(*(_one(session) for session in sessions))
 
     async def resume(self) -> None:
         """恢复监听与推流（pause 的逆操作）。"""

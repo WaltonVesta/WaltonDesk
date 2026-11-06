@@ -493,3 +493,109 @@ class TestHostStatusBroadcast:
             svc._on_capture_stall(False, "")  # noqa: SLF001
         finally:
             await svc.shutdown()
+
+
+class TestPauseResumeScreenFlow:
+    """走查第十二批 Bug 12/14/15：暂停/恢复/重启后的画面闭环。
+
+    病灶链（修复前）：
+    ① SubscriptionRegistry 跨生命周期复用，broadcaster 被 shutdown 后
+       ``_stopped`` 永久置位 → 恢复后新画面订阅 register() 抛 RuntimeError
+       → 服务端画面会话建立即关 → **主控端画面永久卡在最后一帧**（Bug 14
+       恢复不续流、Bug 15 重启不续流的共同主导根因）；
+    ② pipeline.close() 连带关闭采集源，恢复复用同一源实例 → 每帧 capture
+       抛"已关闭"（第二病灶）；
+    ③ pause 静默拆会话，主控端零提示（Bug 12）。
+    """
+
+    async def test_pause_notices_paused_status(self, tmp_app_dir: Path) -> None:
+        """Bug 12：暂停拆会话**前**，活动控制会话必须收到 PAUSED 状态帧。"""
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            ch = _control(s)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+            await svc.pause()
+            msg = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(msg, HostStatus)
+            assert msg.code is HostStatusCode.PAUSED
+            assert "暂停" in msg.detail
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
+    async def test_frames_flow_after_resume(self, tmp_app_dir: Path) -> None:
+        """Bug 14：暂停→恢复后，重新订阅的画面通道必须继续收到新帧。
+
+        病灶复现口径：恢复后用同一服务实例重建控制+画面会话并收帧——修复前
+        register() 抛"已停止"，画面通道 connect 直接失败（AuthError/连接被
+        重置），本哨兵即红。
+        """
+        a = np.zeros((16, 16, 4), dtype=np.uint8)
+        b = np.full((16, 16, 4), 90, dtype=np.uint8)
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s, frames=[a, b])
+        try:
+            await svc.start()
+            await svc.pause()
+            await svc.resume()
+            assert svc.is_running
+
+            ch = _control(s)
+            await ch.connect()
+            sc = ScreenChannel(
+                s.bind_host,
+                s.port,
+                session_token=ch.session_token or "",
+                connection_id=ch.connection_id or b"",
+                fingerprint_confirm=_confirm,
+            )
+            await sc.connect()
+            msg = await asyncio.wait_for(sc.next_message(), timeout=10)
+            assert isinstance(msg, ScreenFrame), msg
+            assert msg.width == 16 and len(msg.data) > 0
+            # 病灶 ②：采集源 reopen——恢复后管线真的在出新帧（订阅数=1、
+            # 且 registry 是新表；旧实现这里 register 抛 RuntimeError）
+            await _wait_until(lambda: svc._registry.count() == 1)  # noqa: SLF001
+            await sc.close()
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
+    async def test_frames_flow_after_restart(self, tmp_app_dir: Path) -> None:
+        """Bug 15：托盘"重启服务"（同进程 restart）后画面必须重新流动。
+
+        用户场景：被控端运行中重启 serve → 主控端重连 → 控制恢复但画面卡在
+        最后一帧。restart 走与 resume 相同的 teardown→start 路径，同受病灶
+        ①②支配。
+        """
+        a = np.zeros((16, 16, 4), dtype=np.uint8)
+        b = np.full((16, 16, 4), 90, dtype=np.uint8)
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s, frames=[a, b])
+        try:
+            await svc.start()
+            await svc.restart()
+            assert svc.is_running and not svc.is_paused
+            registry_after_restart = svc._registry  # noqa: SLF001
+            ch = _control(s)
+            await ch.connect()
+            sc = ScreenChannel(
+                s.bind_host,
+                s.port,
+                session_token=ch.session_token or "",
+                connection_id=ch.connection_id or b"",
+                fingerprint_confirm=_confirm,
+            )
+            await sc.connect()
+            msg = await asyncio.wait_for(sc.next_message(), timeout=10)
+            assert isinstance(msg, ScreenFrame), msg
+            # 登记表必须是运行周期新表（跨 restart 复用旧表即病灶 ①）
+            assert registry_after_restart is svc._registry  # noqa: SLF001
+            assert registry_after_restart.broadcaster.subscriber_ids()
+            await sc.close()
+            await ch.close()
+        finally:
+            await svc.shutdown()

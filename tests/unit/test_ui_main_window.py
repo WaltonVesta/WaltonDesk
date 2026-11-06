@@ -221,6 +221,27 @@ class TestHostStatusHint:
         w.host_status(stalled=False, secure_desktop=False)
         assert "恢复" in w.status_bar._status.text(), w.status_bar._status.text()  # noqa: SLF001
 
+    def test_paused_hint_disables_control(self, qtbot) -> None:
+        """走查第十二批 Bug 12：被控端暂停下行 → 明确提示 + 控制即刻禁用。
+
+        病灶（修复前）：pause 静默拆会话，主控端只见画面卡住，输入按钮仍可
+        点、无任何"对方已暂停"信息。修复后 PAUSED 下行经 host_status(paused=
+        True) 走统一控制开关入口：控制器收到 set_control_enabled(False)、
+        画面输入禁用、状态栏直显"远端已暂停服务"。
+        """
+        w, c = self._win(qtbot)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        w.toolbar._control_btn.click()  # noqa: SLF001 先开控制
+        assert w.screen_view.input_enabled
+        c.control_flags.clear()
+
+        w.host_status(stalled=False, secure_desktop=False, paused=True)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert "已暂停" in text, text
+        assert c.control_flags == [False], c.control_flags  # 控制已下发禁用
+        assert not w.screen_view.input_enabled  # 画面输入随之关闭
+        assert not w.toolbar._control_btn.isChecked()  # noqa: SLF001
+
 
 class TestDeletedUiCallbacks:
     """走查第六批 Bug5：主窗销毁后 controller 迟到回调不得触达已删 C++ 对象。
