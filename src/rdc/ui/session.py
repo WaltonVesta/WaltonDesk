@@ -104,7 +104,9 @@ async def _restart(service: HostService, tray: TrayController) -> None:
     tray.set_state(TrayState.RUNNING)
 
 
-async def host_session(app: Any, settings: Settings | None = None) -> int:
+async def host_session(
+    app: Any, settings: Settings | None = None, *, first_run_password: str = ""
+) -> int:
     """被控端 GUI 会话（服务 + 托盘）：运行至托盘"退出"，返回退出码。
 
     被 :func:`run_gui`（launcher 选 HOST）与 ``rdc serve --tray`` 共用。
@@ -124,10 +126,24 @@ async def host_session(app: Any, settings: Settings | None = None) -> int:
     )
 
     s = settings if settings is not None else current_settings()
+    from rdc.console_safety import console_stream
+    from rdc.server.initial_password import first_run_notice_text
+
     # 首启生成（幂等：已有口令不动）。created 时才落盘，避免无谓写盘。
-    if ensure_host_password(s).created:
+    # 走查第十三批 Bug 2：气泡/控制台回显用**当次内存明文**（本函数生成，
+    # 或 CLI 经 first_run_password 传入），绝不依赖密钥库回读——DPAPI 写
+    # 失败/回读失败也要让用户当场看到密码（旧实现回读空串 → 双双静默）。
+    result = ensure_host_password(s)
+    if result.created:
         save_settings(s)
         set_current(s)
+    plaintext = result.password or first_run_password
+    if plaintext:
+        notice = first_run_notice_text(plaintext)
+        # 控制台显式打印（用户要求①）；windowed 无控制台时经守卫流安全丢弃
+        print(notice, file=console_stream())
+    else:
+        notice = initial_notice_text(s)  # 重启回显态（受"不再提示"约束）
     service = HostService(settings=s, show_tray=True)
     if not await service.start():
         _LOG.error("gui_host_start_failed")
@@ -165,8 +181,8 @@ async def host_session(app: Any, settings: Settings | None = None) -> int:
     tray.noticeSuppressed.connect(_suppress_notice)
     tray.set_state(TrayState.RUNNING)
     tray.show()
-    # 初始口令气泡（仅自动生成态且未抑制；托盘不可用时降级日志，不静默）
-    notice = initial_notice_text(s)
+    # 初始口令气泡：notice 已在服务启动前按"当次明文优先、回读兜底"算好，
+    # 此处直接投递；托盘不可用时降级日志，不静默（第十三批 Bug 2）。
     if notice and not tray.notify_initial_password(notice):
         _LOG.warning("initial_password_notice_no_tray")
     try:

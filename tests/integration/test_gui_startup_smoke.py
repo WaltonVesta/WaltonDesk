@@ -80,7 +80,7 @@ def test_serve_tray_session_coroutine_is_scheduled(
     """``rdc serve --tray``：_run_gui_with 驱动 host_session 协程（同病灶第二处）。"""
     calls: list[str] = []
 
-    async def fake_host_session(app, settings=None):
+    async def fake_host_session(app, settings=None, **kwargs):  # first_run_password 等
         calls.append("host")
         return 0
 

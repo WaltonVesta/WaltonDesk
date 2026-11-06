@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import getpass
 import sys
 from collections.abc import Awaitable, Callable
@@ -27,7 +28,7 @@ from typing import Any
 
 from rdc import __version__
 from rdc.config.settings import Settings, load_settings, save_settings, set_current
-from rdc.console_safety import stdin_is_absent, stdin_is_tty
+from rdc.console_safety import console_stream, stdin_is_absent, stdin_is_tty
 from rdc.logging import get_logger
 from rdc.security.password_policy import check_password, policy_error_text
 
@@ -93,7 +94,9 @@ def _run_serve(args: argparse.Namespace) -> int:
     from rdc.server.initial_password import ensure_host_password
 
     silent = bool(getattr(args, "silent", False))
-    ensure_host_password(settings)
+    # 走查第十三批 Bug 2：接住生成结果的**内存明文**——首启当次回显绝不依赖
+    # DPAPI 回读（旧实现回读失败即静默，用户只见日志不见密码）。
+    created_plaintext = ensure_host_password(settings).password
     # 落盘写回**加载来源同一文件**（--config 便携/测试模式若写默认位置，
     # 生成的口令下次启动即丢失——用户拿到的初始密码永远连不上）。
     save_settings(settings, config_path)
@@ -101,11 +104,16 @@ def _run_serve(args: argparse.Namespace) -> int:
     if args.tray:
         from rdc.ui.session import host_session
 
-        return _run_gui_with(host_session, settings)
-    return _run_serve_headless(settings, silent=silent)
+        # 首启明文注入 host_session（kwargs 偏绑定，_run_gui_with 通用两参调用不变）
+        return _run_gui_with(
+            functools.partial(host_session, first_run_password=created_plaintext), settings
+        )
+    return _run_serve_headless(settings, silent=silent, first_run_password=created_plaintext)
 
 
-def _run_serve_headless(settings: Settings, *, silent: bool = False) -> int:
+def _run_serve_headless(
+    settings: Settings, *, silent: bool = False, first_run_password: str = ""
+) -> int:
     """无 GUI 被控端：asyncio 跑至 Ctrl+C。``silent``（开机自启）不打印横幅。"""
     import asyncio
 
@@ -127,7 +135,7 @@ def _run_serve_headless(settings: Settings, *, silent: bool = False) -> int:
             with contextlib.suppress(NotImplementedError):  # Windows Proactor 部分信号不支持
                 loop.add_signal_handler(sig, stop.set)
         if not silent:
-            _print_host_banner(service, settings)
+            _print_host_banner(service, settings, first_run_password)
         try:
             await stop.wait()
         finally:
@@ -167,20 +175,47 @@ def _run_gui_with(
     return int(loop.run_forever())
 
 
-def _print_host_banner(service: object, settings: Settings) -> None:
-    """控制台就绪提示（地址/端口/开关无敏感值；Feature 18 追加初始口令显眼回显）。"""
+def _print_host_banner(
+    service: object, settings: Settings, first_run_password: str = ""
+) -> None:
+    """控制台就绪提示（地址/端口/开关无敏感值；Feature 18 追加初始口令显眼回显）。
+
+    走查第十三批 Bug 2：首启当次的明文经 ``first_run_password`` 参数直接
+    格式化——**不再**依赖密钥库回读（旧实现 DPAPI 回读失败即整段静默，
+    用户只见"已生成"日志不见密码）。``first_run_password`` 为空（非首启）
+    才走 :func:`_initial_notice_text_safe`（回读态，受"不再提示"约束）。
+    写入统一经 :func:`rdc.console_safety.console_stream`：``--windowed`` 下
+    ``sys.stdout`` 为 ``None``，裸 ``print`` 会抛 "lost sys.stdout"。
+    """
+    out = console_stream()
     print(
         f"被控端已启动: 监听 {settings.bind_host} "
         f"控制端口={settings.control_port} 画面端口={settings.port} "
         f"认证={'开' if settings.enable_auth and settings.password_hash else '关（任意口令）'} "
-        f"(Ctrl+C 退出)"
+        f"(Ctrl+C 退出)",
+        file=out,
     )
-    notice = _initial_notice_text_safe(settings)
+    notice = _first_run_notice_text_safe(first_run_password) or _initial_notice_text_safe(
+        settings
+    )
     if notice:
         # 显眼回显：空行 + 分隔线包裹，控制台里一眼可见（Feature 18 要求）
-        print("=" * 48)
-        print(notice)
-        print("=" * 48)
+        print("=" * 48, file=out)
+        print(notice, file=out)
+        print("=" * 48, file=out)
+
+
+def _first_run_notice_text_safe(password: str) -> str:
+    """首启当次回显文案（延迟导入，异常降级空串，绝不炸启动）。"""
+    if not password:
+        return ""
+    try:
+        from rdc.server.initial_password import first_run_notice_text
+
+        return first_run_notice_text(password)
+    except Exception as exc:  # noqa: BLE001 - 回显失败不影响被控端已启动的事实
+        _LOG.warning("first_run_notice_render_failed", error=repr(exc))
+        return ""
 
 
 def _initial_notice_text_safe(settings: Settings) -> str:

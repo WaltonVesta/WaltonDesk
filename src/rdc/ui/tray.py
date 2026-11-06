@@ -8,7 +8,6 @@ v4 用 pystray（本机实测未安装）+ PIL 画图标；v5 用 Qt 原生托�
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -120,6 +119,11 @@ class TrayController(QObject):
         self._allow_restart = allow_restart
         self._icon = QSystemTrayIcon(build_tray_icon(self._state), parent or QApplication.instance())
         self._icon.activated.connect(self._on_activated)
+        # 走查第十三批 Bug 2：messageClicked 一次性 connect 到守卫方法（替代
+        # 旧 notify 里 disconnect()+connect()——无连接时 disconnect 必发
+        # RuntimeWarning）。守卫确保仅在初始口令气泡展示期间触发抑制。
+        self._notice_pending = False
+        self._icon.messageClicked.connect(self._on_message_clicked)
         self._menu = self._build_menu()
         self._icon.setContextMenu(self._menu)
         self._uptime_fn: Callable[[], float] | None = None
@@ -170,14 +174,25 @@ class TrayController(QObject):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return False
         # 气泡本体放不进"不再提示"勾选框（QSystemTrayIcon 限制）：气泡负责
-        # 显眼展示明文，点击气泡后由 on_message_clicked 路径处理抑制。
-        self._icon.showMessage(
+        # 显眼展示明文，点击气泡后由 _on_message_clicked 路径处理抑制。
+        # 走查第十三批 Bug 2 两处修正：
+        # ① 投递延迟到下一轮事件循环——showMessage 紧跟 show() 时，Windows
+        #    通知区尚未完成图标注册，气泡被系统直接吞掉（真机表现"托盘没有
+        #    弹出气泡"）；QTimer.singleShot(0) 跨过注册时序窗。
+        # ② 点击回调构建期一次性 connect（见 __init__），此处**不再**
+        #    disconnect()/connect()——PySide6 对无连接信号调用 disconnect
+        #    必发 RuntimeWarning（真机终端警告源头）。
+        QTimer.singleShot(0, lambda: self._icon.showMessage(
             "远程桌面控制 · 初始密码", text, build_tray_icon(TrayState.RUNNING), timeout_ms
-        )
-        with contextlib.suppress(RuntimeError, TypeError):
-            self._icon.messageClicked.disconnect()  # 从未连接过：Qt 无接收者时抛错
-        self._icon.messageClicked.connect(self.noticeSuppressed.emit)
+        ))
+        self._notice_pending = True
         return True
+
+    def _on_message_clicked(self) -> None:
+        """气泡点击 → 仅在初始口令气泡展示期间触发"不再提示"（第十三批）。"""
+        if self._notice_pending:
+            self._notice_pending = False
+            self.noticeSuppressed.emit()
 
     # -- 内部 ---------------------------------------------------------------------
 

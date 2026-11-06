@@ -158,6 +158,51 @@ class TestNoticeText:
         assert ip.initial_notice_text(s) == ""
 
 
+class TestFirstRunNoticeText:
+    """走查第十三批 Bug 2：首启当次文案直接格式化内存明文，绝不依赖密钥库回读。"""
+
+    def test_prints_plaintext_without_any_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 即便回读函数被打成恒空，first_run_notice_text 仍输出明文（走的是入参）
+        monkeypatch.setattr(ip, "load_initial_password", lambda *_a, **_k: "")
+        text = ip.first_run_notice_text("Abcd2345")
+        assert "Abcd2345" in text
+        assert "首次启动" in text and "初始密码" in text
+
+    def test_empty_password_yields_empty(self) -> None:
+        assert ip.first_run_notice_text("") == ""
+
+    def test_ensure_returns_plaintext_even_if_store_save_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DPAPI save 抛错时 ensure_host_password 仍返回内存明文（供首启打印）。"""
+
+        class _BoomStore:
+            name = "boom"
+
+            def available(self) -> bool:
+                return True
+
+            def save(self, key: str, value: str) -> None:
+                raise RuntimeError("DPAPI 写入失败")
+
+            def load(self, key: str) -> str | None:
+                return None
+
+            def delete(self, key: str) -> None:
+                pass
+
+        monkeypatch.setattr(
+            ip, "get_secret_store",
+            lambda *a, **k: StoreSelection(store=_BoomStore(), degraded=True, reason="x"),
+        )
+        s = Settings()
+        result = ip.ensure_host_password(s)
+        assert result.created and result.password  # 明文照返，首启打印不哑火
+        assert ip.first_run_notice_text(result.password) != ""
+        # 但回读路径确实拿不到（密钥库没写进去）——这正是旧实现静默的场景
+        assert ip.initial_notice_text(s) == ""
+
+
 class TestMarkAndSuppress:
     def test_mark_user_set_clears_flags_and_plaintext(self, mem_store: _MemStore) -> None:
         s = Settings()

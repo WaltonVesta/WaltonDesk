@@ -174,3 +174,81 @@ class TestChangePasswordDialog:
             return await request_new_password(None, timeout_s=5.0)
 
         assert drive(qapp, _main) is None
+
+
+# ---------------------------------------------------------------------------
+# 初始口令气泡（走查第十三批 Bug 2：延迟投递 + 去 disconnect 警告 + 点击守卫）
+# ---------------------------------------------------------------------------
+
+
+class _FakeTrayIcon:
+    """替身 QSystemTrayIcon 类：真信号 + 记录 showMessage（不触通知区）。"""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        from PySide6.QtCore import QObject, Signal
+
+        class _Sig(QObject):
+            activated = Signal(object)
+            messageClicked = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+
+        self._sig = _Sig()
+        self.activated = self._sig.activated
+        self.messageClicked = self._sig.messageClicked
+        self.shown: list[tuple[str, str]] = []
+
+    @classmethod
+    def isSystemTrayAvailable(cls) -> bool:  # noqa: N802 - Qt API 命名
+        return True
+
+    def showMessage(self, title: str, msg: str, *a: object, **k: object) -> None:  # noqa: N802
+        self.shown.append((title, msg))
+
+    def setContextMenu(self, _menu: object) -> None: ...  # noqa: N802
+    def setIcon(self, _icon: object) -> None: ...  # noqa: N802
+    def setToolTip(self, _t: str) -> None: ...  # noqa: N802
+    def show(self) -> None: ...
+    def hide(self) -> None: ...
+
+
+class TestTrayInitialBubble:
+    def _tray_with_fake_icon(self, monkeypatch: pytest.MonkeyPatch):
+        import PySide6.QtWidgets as QtWidgets
+
+        monkeypatch.setattr(QtWidgets, "QSystemTrayIcon", _FakeTrayIcon)
+        tray = TrayController(autostart_get=lambda: False, autostart_set=lambda e: True)
+        return tray, tray._icon  # noqa: SLF001 - 取替身实例断言 showMessage 记录
+
+    def test_showmessage_delayed_not_synchronous(self, qtbot, monkeypatch) -> None:
+        """投递延迟到下一轮事件循环（跨过图标注册时序窗，修"气泡被吞"）。"""
+        tray, icon = self._tray_with_fake_icon(monkeypatch)
+        assert tray.notify_initial_password("当前连接口令：Abcd2345") is True
+        assert icon.shown == [], "showMessage 不应同步调用（须 singleShot(0) 延迟）"
+        qtbot.wait(30)  # 跑过事件循环
+        assert len(icon.shown) == 1 and "Abcd2345" in icon.shown[0][1]
+
+    def test_notify_emits_no_disconnect_runtime_warning(self, qtbot, monkeypatch) -> None:
+        """第十三批 Bug 2 警告源头：无连接时不得再调 messageClicked.disconnect()。"""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            tray, _icon = self._tray_with_fake_icon(monkeypatch)
+            for _ in range(3):  # 重复通知，旧实现每次 disconnect 累积警告
+                tray.notify_initial_password("口令 Xyz12345")
+            qtbot.wait(20)
+        bad = [str(w.message) for w in caught if "disconnect" in str(w.message).lower()]
+        assert not bad, f"不应出现 disconnect 相关 RuntimeWarning：{bad}"
+
+    def test_message_clicked_only_suppresses_when_pending(self, qtbot, monkeypatch) -> None:
+        """点击守卫：仅在气泡展示期间触发"不再提示"，非展示期点击不吞抑制态。"""
+        tray, icon = self._tray_with_fake_icon(monkeypatch)
+        fired: list[int] = []
+        tray.noticeSuppressed.connect(lambda: fired.append(1))
+        icon.messageClicked.emit()  # 未通知时点击 → 不触发
+        assert fired == []
+        tray.notify_initial_password("口令 Abcd2345")
+        qtbot.wait(20)
+        icon.messageClicked.emit()
+        assert fired == [1]
+        icon.messageClicked.emit()
+        assert fired == [1], "一次气泡只允许一次抑制触发"
