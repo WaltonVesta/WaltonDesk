@@ -225,9 +225,13 @@ class ClientController:
           ``disconnected`` 并上抛，绝不进重连环**（2026-10-06 走查第四批：
           旧版首连认证失败也起环，环内立即复用错误口令再试一次，一次点击
           烧两次服务端失败计数、喂封禁窗口——"点 2 次就封"病灶）；
-        - 网络类失败（OSError 等）且 ``auto_reconnect`` → 进入重连环
-          （状态 ``reconnecting``，指数退避；环内认证/TLS 类失败同样终止）；
-        - 未开自动重连 → ``disconnected`` + 异常上抛。
+        - **其余失败（网络类 OSError，含 ConnectionRefusedError）同样直接
+          落定 ``disconnected`` 并上抛，绝不进重连环**（2026-11-06 走查
+          第十二批 Bug 19：连未开被控端的 IP 时旧版起环无限重试，UI 卡
+          "重连中"零提示，界面形同死机）。重连只服务于**会话期链路死亡**
+          （:meth:`_on_link_dead` → :meth:`_start_reconnect_loop`），该路径
+          不受 auto_reconnect 之外的本改动影响。
+        - 未开自动重连 → 行为同上（首连失败从不依赖该开关）。
 
         封禁缓存（走查第四批缺陷 2）：上次握手收到 ``banned`` 响应即缓存
         到期时刻；本主机仍在封禁期内时，connect **不发网络包、不弹口令框**，
@@ -250,10 +254,14 @@ class ClientController:
             await self._final_disconnect()
             raise
         except BaseException:
-            if self._settings.auto_reconnect and not self._user_disconnect:
-                self._start_reconnect_loop()
-            else:
-                self._set_state("disconnected")
+            # 走查第十二批 Bug 19：**初次连接失败绝不启动重连环**。旧版按
+            # auto_reconnect 起环——连一台"未开被控端"的机器时，环每 2s 重试
+            # 一次 ConnectionRefusedError，UI 停在"重连中"、连接按钮被禁用、
+            # 零提示，界面形同死机（用户唯一出口是关窗）。初次连接是**用户
+            # 显式动作**，失败原因（地址错/对方没开服务/防火墙）不会在几秒内
+            # 自愈，盲试无意义；auto_reconnect 的正当场景是**会话期链路死亡**
+            # （:_meth:`_on_link_dead`），该路径保持不变。
+            await self._final_disconnect()
             raise
         self._set_state("connected")
 

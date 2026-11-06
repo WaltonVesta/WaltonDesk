@@ -224,15 +224,48 @@ class TestStateMachine:
         await asyncio.sleep(0)  # 给重连环一拍，确认无人启动
         assert ctl._reconnect is None  # noqa: SLF001
 
-    async def test_connect_network_failure_starts_reconnect_loop(self) -> None:
+    async def test_connect_network_failure_does_not_start_reconnect_loop(self) -> None:
+        """走查第十二批 Bug 19：初次连接被拒**绝不**进重连环。
+
+        病灶（修复前）：首连 OSError 按 auto_reconnect 起环，连一台没开被控端
+        的机器时环每 2s 盲试 ConnectionRefusedError，UI 卡"重连中"、连接按钮
+        禁用、零提示，界面形同死机。修复后：直接落定 disconnected 并上抛，
+        由 UI 弹窗提示；重连仅服务会话期链路死亡（见 link_dead 用例）。
+        """
         FakeControl.connect_error = ConnectionRefusedError("拒绝")
         ctl, _ = make_ctrl(Settings(auto_reconnect=True, reconnect_delay=0.01, max_reconnect_attempts=2))
+        calls_before = len(FakeControl.instances)
         with pytest.raises(ConnectionRefusedError):
             await connect_ok(ctl)
-        assert ctl.state == "reconnecting"
-        # 环在退避中；最终耗尽 → disconnected
-        await asyncio.sleep(0.3)
         assert ctl.state == "disconnected"
+        assert ctl._reconnect is None  # noqa: SLF001
+        await asyncio.sleep(0.15)  # 若错误地起了环，此处会暴露第二次尝试
+        assert len(FakeControl.instances) - calls_before == 1
+        assert ctl.state == "disconnected"
+
+    async def test_connect_generic_oserror_also_aborts_ring(self) -> None:
+        """Bug 19 口径：任何非认证类首连失败都不起环（OSError 全类型）。"""
+        FakeControl.connect_error = OSError("网络不可达")
+        ctl, _ = make_ctrl(Settings(auto_reconnect=True, reconnect_delay=0.01))
+        with pytest.raises(OSError):
+            await connect_ok(ctl)
+        assert ctl.state == "disconnected"
+        assert ctl._reconnect is None  # noqa: SLF001
+
+    async def test_link_dead_still_starts_ring_after_connected(self) -> None:
+        """Bug 19 修复的边界对照：**会话期**链路死亡仍照常起环。
+
+        首连不起环不等于重连功能被砍——connected 之后链路判死必须继续走
+        auto_reconnect（走查第六批 Bug4 等既有语义不得回归）。
+        """
+        ctl, _ = make_ctrl(Settings(auto_reconnect=True, reconnect_delay=0.01))
+        await connect_ok(ctl)
+        assert ctl.state == "connected"
+        FakeControl.connect_error = None
+        ctl._on_link_dead("control_eof")  # noqa: SLF001
+        assert ctl.state == "reconnecting"
+        await asyncio.sleep(0.2)
+        assert ctl.state == "connected"
 
     async def test_connect_auth_failure_starts_no_reconnect(self) -> None:
         # 走查第四批缺陷 3：首连认证失败**绝不进重连环**——一次点击恰好一次

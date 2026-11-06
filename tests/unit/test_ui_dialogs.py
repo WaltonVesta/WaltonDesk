@@ -393,19 +393,33 @@ class TestMainWindowStateMachine:
         assert c.confirm_calls == [("10.1.2.3", "True")]
         assert "已连接" in w.status_bar._status.text()  # noqa: SLF001
 
-    def test_connect_failure_with_auto_reconnect(self, qapp, qtbot) -> None:
+    def test_connect_failure_network_first_connect_aborts_with_box(self, qapp, qtbot) -> None:
+        """走查第十二批 Bug 19：首连网络失败 → 落定断开 + 明确提示，不再"重连中"。
+
+        旧语义（病灶）：auto_reconnect 开 → UI 进 RECONNECTING，而 controller
+        首连已不再起环 → 界面永远停在"重连中..."、连接按钮禁用、零提示，
+        用户以为程序死机。新语义：DISCONNECTED + 状态栏原因 + 弹窗（含"未开启
+        被控端"字样）+ IP 输入框解锁可重试。
+        """
         c = FakeController()
         c.fail_connect = True
         w, _ = self._win(qtbot, c)
         w._settings = Settings(auto_reconnect=True)  # noqa: SLF001
         w.toolbar._host.setCurrentText("h")  # noqa: SLF001
+        boxes: list[str] = []
+        w._error_box = boxes.append  # 捕获弹窗文案（非模态框不阻塞 drive）
 
         async def _main() -> None:
             w.toolbar._connect_btn.click()  # noqa: SLF001
             await asyncio.sleep(0.3)
 
         drive(qapp, _main)
-        assert w.state == ConnectionState.RECONNECTING
+        assert w.state == ConnectionState.DISCONNECTED
+        assert boxes, "必须弹窗提示（Bug 19：用户唯一可见的失败出口）"
+        assert "被控端" in boxes[0], boxes[0]
+        assert "h" in boxes[0], boxes[0]
+        assert w.toolbar._host.isEnabled()  # noqa: SLF001
+        assert w.toolbar._connect_btn.isEnabled()  # noqa: SLF001 - 按钮恢复可用
 
     def test_disconnect_resets_state(self, qapp, qtbot) -> None:
         w, c = self._win(qtbot)

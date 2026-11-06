@@ -397,7 +397,7 @@ class MainWindow(QMainWindow):
         self._on_connect_success(host)
 
     def _handle_connect_failure(self, host: str, exc: Exception | None = None) -> None:
-        """失败分派（第四批缺陷 1/3 口径）：
+        """失败分派（第四批缺陷 1/3 口径 + 第十二批 Bug 19 收口）：
 
         - 用户取消口令（AuthCancelledError）→ DISCONNECTED，中性"已取消连接"
           （主动放弃不报"认证失败"，避免误导）；
@@ -405,8 +405,11 @@ class MainWindow(QMainWindow):
           UI 直接落定 DISCONNECTED 并用红字展示具体原因（如"口令校验失败"）；
         - 封禁（AuthBannedError，AuthError 子类）→ 落定 DISCONNECTED 后**额外
           禁用连接按钮 + 启动墙钟倒计时**（走查第六批 Bug6），归零自动恢复；
-        - 其余（网络类）→ 沿用 auto_reconnect 策略：开 → RECONNECTING
-          （controller 内部重试），关 → DISCONNECTED 泛化错误文本。
+        - **其余（网络类：ConnectionRefusedError / 其它 OSError）→ 落定
+          DISCONNECTED + 弹窗明确提示**（第十二批 Bug 19）。旧版此处按
+          auto_reconnect 进 RECONNECTING，而 controller 首连已不再起环——
+          UI 会永远停在"重连中..."且无任何提示（界面像死机）。现在弹窗
+          给出人话原因（被拒=对方没开被控端），状态机回到可连接态。
         """
         if isinstance(exc, AuthCancelledError):
             self._set_state(ConnectionState.DISCONNECTED)
@@ -424,12 +427,23 @@ class MainWindow(QMainWindow):
             self.status_bar.set_status(str(exc) or "认证失败", "error")
             self.toolbar.set_host_editable(True)
             return
-        if self._settings.auto_reconnect:
-            self._set_state(ConnectionState.RECONNECTING)
-        else:
-            self._set_state(ConnectionState.DISCONNECTED)
-            self.status_bar.set_status(f"连接 {host} 失败", "error")
-            self.toolbar.set_host_editable(True)
+        # 网络类：首连失败不再假装"重连中"（controller 侧亦已不起环）
+        self._set_state(ConnectionState.DISCONNECTED)
+        reason = self._network_failure_reason(exc)
+        self.status_bar.set_status(f"连接 {host} 失败：{reason}", "error")
+        self.toolbar.set_host_editable(True)
+        self._error_box(f"无法连接 {host}\n\n{reason}\n\n请确认对方已开启被控端后重试。")
+
+    @staticmethod
+    def _network_failure_reason(exc: Exception | None) -> str:
+        """网络失败 → 用户可读原因（Bug 19：把异常分型翻译成人话）。"""
+        if isinstance(exc, ConnectionRefusedError):
+            return "对方未开启被控端（连接被拒绝）"
+        if isinstance(exc, TimeoutError):
+            return "连接超时（地址不可达或被防火墙拦截）"
+        if isinstance(exc, OSError):
+            return str(exc) or "网络不可达"
+        return str(exc) or "连接失败"
 
     def _on_connect_success(self, host: str) -> None:
         self._stop_ban_countdown(restore_button=False)  # 成功即清残留倒计时（按钮归状态机管）
