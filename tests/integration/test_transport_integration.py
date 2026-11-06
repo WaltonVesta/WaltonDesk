@@ -226,3 +226,39 @@ class TestScreenEndToEnd:
             await ch.close()
         finally:
             await server.stop()
+
+
+class TestStopOrdering:
+    """走查第十三批 Bug 1：``stop()`` 收尾顺序——不得被在途 handler 拖住。
+
+    病灶（旧序）：``close listener → wait_closed → 关会话``。Python 3.12+ 起
+    ``Server.wait_closed()`` 会等**全部在途 handler 任务**返回，而 handler 阻塞
+    在会话 ``next_message()``（EOF 尚未投递，因关会话排在 wait_closed 之后）→
+    ``stop()`` 被拖到 handler 空闲超时（HostService 场景实测 ~9.9s），期间
+    ``HostService.pause()`` 全程阻塞、``is_paused`` 恒 False、托盘文案不刷新。
+    修复后"关会话投 EOF 唤醒 handler"排在 wait_closed 之前，stop 毫秒级。
+    """
+
+    async def test_stop_fast_with_inflight_blocking_handler(self, certs) -> None:  # noqa: ANN001
+        started = asyncio.Event()
+
+        async def on_control(session: ControlSession) -> None:
+            # 模拟真实 _serve_control：交付后长期驻留等消息（无超时兜底形态）
+            started.set()
+            await session.next_message()
+
+        server, ctrl_port, _scr = await _run_server(certs, on_control_session=on_control)
+        ch = _control("127.0.0.1", ctrl_port, "")
+        try:
+            await ch.connect()
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await asyncio.sleep(0.1)  # handler 已阻塞在 next_message
+            t0 = asyncio.get_running_loop().time()
+            await asyncio.wait_for(server.stop(), timeout=3.0)
+            dt = asyncio.get_running_loop().time() - t0
+            assert dt < 2.0, f"stop() 耗时 {dt:.2f}s，wait_closed 顺序疑似回归"
+            assert not server.listening
+        finally:
+            await ch.close()
+            if server.listening:
+                await server.stop()

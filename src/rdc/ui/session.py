@@ -75,15 +75,27 @@ def build_client_controller(settings: Settings | None = None) -> ClientControlle
     return ClientController(settings=s, image_factory=qimage_factory)
 
 
-async def _toggle_pause(service: HostService, tray: TrayController) -> None:
-    """托盘"暂停/恢复"：服务态与托盘图标同步。"""
-    if service.is_paused:
-        await service.resume()
-        tray.set_state(TrayState.RUNNING)
-    else:
-        await service.pause()
-        tray.set_state(TrayState.PAUSED)
-    tray.update_client_count(service.snapshot().active_connections)
+async def _toggle_pause(
+    service: HostService, tray: TrayController, lock: asyncio.Lock
+) -> None:
+    """托盘"暂停/恢复"：服务态与托盘图标同步。
+
+    走查第十三批 Bug 1：加装配层锁——上一次切换未结束（如残留慢收尾）时
+    用户再点直接丢弃（防重复下发），而非排队二次执行；完成后按服务**实际
+    状态**刷新托盘（pause/resume 失败不再谎报，异常入日志）。
+    """
+    if lock.locked():
+        return  # 上一次切换进行中：吞掉重入点击（幂等防抖）
+    async with lock:
+        try:
+            if service.is_paused:
+                await service.resume()
+            else:
+                await service.pause()
+        except Exception as exc:  # noqa: BLE001 - UI 触发入口必须兜住，失败不静默
+            _LOG.error("tray_pause_toggle_failed", error=repr(exc))
+        tray.set_state(TrayState.PAUSED if service.is_paused else TrayState.RUNNING)
+        tray.update_client_count(service.snapshot().active_connections)
 
 
 async def _restart(service: HostService, tray: TrayController) -> None:
@@ -121,8 +133,11 @@ async def host_session(app: Any, settings: Settings | None = None) -> int:
         _LOG.error("gui_host_start_failed")
         return 1
     stop = asyncio.Event()
+    pause_lock = asyncio.Lock()  # 走查第十三批 Bug 1：托盘暂停/恢复切换防抖锁
     tray = TrayController()
-    tray.pauseToggled.connect(lambda: asyncio.ensure_future(_toggle_pause(service, tray)))
+    tray.pauseToggled.connect(
+        lambda: asyncio.ensure_future(_toggle_pause(service, tray, pause_lock))
+    )
     tray.restartRequested.connect(lambda: asyncio.ensure_future(_restart(service, tray)))
     tray.quitRequested.connect(stop.set)
 

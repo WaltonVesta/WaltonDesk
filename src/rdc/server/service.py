@@ -260,12 +260,22 @@ class HostService:
         """暂停：停止监听与推流，进程保留（v4 pause 语义，托盘菜单用）。"""
         if self._paused or self._server is None:
             return
+        # 走查第十三批 Bug 1：``_paused`` 入口即置位（旧版在 teardown 之后）。
+        # 旧 teardown 被会话空闲窗口拖住（实测 stop()≈10s），期间 is_paused
+        # 恒 False → 托盘"暂停服务"文案不动、再点仍重复下发暂停。前置置位后
+        # 重入即刻短路（幂等），配合 TransportServer.stop 顺序修复，暂停在
+        # 毫秒级完成、文案随即刷新。
+        self._paused = True
         # 走查第十二批 Bug 12：拆会话**前**先给全部控制会话下行 PAUSED 状态帧
         # （并发、单会话限时 2s 隔离）。旧版 pause 静默关监听，主控端只看到
         # EOF——画面卡住、无任何"对方已暂停"信息。
         await self._broadcast_paused_notice()
-        await self._teardown_runtime()
-        self._paused = True
+        try:
+            await self._teardown_runtime()
+        except Exception:
+            # 收尾异常回滚标志：避免"未暂停却显示已暂停"的反向不一致
+            self._paused = False
+            raise
         _LOG.info("host_service_paused")
 
     async def _broadcast_paused_notice(self, timeout_s: float = 2.0) -> None:

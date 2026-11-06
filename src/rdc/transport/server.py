@@ -161,17 +161,17 @@ class TransportServer:
     async def stop(self) -> None:
         """停止监听、关闭全部活动会话并回收连接任务（幂等）。
 
-        顺序：①关监听器（拒绝新连接）→ ②关闭会话（投 EOF 哨兵唤醒 hook）
-        → ③取消仍未结束的连接任务并等待收尾。
+        走查第十三批 Bug 1（顺序修正）：旧序 ①close listener+``wait_closed``
+        ②关会话 ③收任务——Python 3.12+ 起 ``Server.wait_closed()`` 会等**全部
+        在途 handler 任务**跑完，而控制 handler 阻塞在 ``heartbeat_timeout``
+        （默认 10s）读空闲窗口里，EOF 哨兵又要等 ② 才投递 → ``stop()`` 实测
+        被拖 9.9s（``HostService.pause()`` 同步卡死，期间 ``is_paused`` 恒
+        False、托盘文案不动、再点仍发暂停）。新序：①``close()`` 拒新连（不
+        等待）→ ②关会话投 EOF 即时唤醒 handler → ③取消并回收残余任务 →
+        ④最后 ``wait_closed()``（此时 handler 已自然收尾，毫秒级）。
         """
         for server in self._servers:
             server.close()
-        for server in self._servers:
-            try:
-                await server.wait_closed()
-            except OSError as exc:  # 关闭竞态噪音：记录不吞（约束 6）
-                self._log.debug("server_wait_closed_failed", error=repr(exc))
-        self._servers = []
         sessions = list(self._sessions)
         self._sessions.clear()
         for session in sessions:
@@ -190,6 +190,12 @@ class TransportServer:
                 pass
             except (OSError, TlsError) as exc:
                 self._log.debug("connection_task_cleanup_failed", error=repr(exc))
+        for server in self._servers:
+            try:
+                await server.wait_closed()
+            except OSError as exc:  # 关闭竞态噪音：记录不吞（约束 6）
+                self._log.debug("server_wait_closed_failed", error=repr(exc))
+        self._servers = []
 
     @property
     def listening(self) -> bool:

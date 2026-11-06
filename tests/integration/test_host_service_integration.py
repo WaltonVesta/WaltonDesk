@@ -187,6 +187,32 @@ class TestLifecycle:
             await svc.shutdown()
         assert svc.should_exit and not svc.is_running
 
+    async def test_pause_fast_with_active_control_session(self, tmp_app_dir: Path) -> None:
+        """走查第十三批 Bug 1：有活动连接时 pause 须毫秒级完成并即刻置位。
+
+        病灶（旧序）：``TransportServer.stop`` 把 ``wait_closed`` 排在关会话
+        **之前**，Python 3.12+ 起 ``Server.wait_closed()`` 等在途 handler 跑完，
+        而控制 handler 阻塞在 ``next_message`` 的空闲窗口 → ``pause()`` 被拖满
+        ``heartbeat_timeout``（真机默认 10s，期间 ``is_paused`` 恒 False、托盘
+        "暂停服务"文案不动、再点仍重复下发暂停）。本例把心跳超时压到 1.0s：
+        旧码 pause 拖满 ≈1.0s（wait_for 0.5s → 转红），新码毫秒级（绿）。
+        """
+        s = make_settings(tmp_app_dir, heartbeat_timeout=1.0)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            assert await svc.start()
+            ch = _control(s, PW)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)
+            t0 = asyncio.get_running_loop().time()
+            await asyncio.wait_for(svc.pause(), timeout=0.5)
+            dt = asyncio.get_running_loop().time() - t0
+            assert svc.is_paused
+            assert dt < 0.4, f"pause 耗时 {dt:.2f}s，stop 收尾顺序疑似回归"
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
     async def test_start_bad_port_returns_false(self, tmp_app_dir: Path) -> None:
         import socket
 

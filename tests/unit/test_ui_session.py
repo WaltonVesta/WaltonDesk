@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -76,3 +77,86 @@ class TestBuildClientController:
     def test_settings_default_when_none(self, qapp, tmp_app_dir) -> None:
         ctl = build_client_controller()
         assert isinstance(ctl, ClientController)
+
+
+# ---------------------------------------------------------------------------
+# _toggle_pause（走查第十三批 Bug 1：托盘暂停/恢复 Toggle）
+# ---------------------------------------------------------------------------
+
+
+class _FakeSnapshot:
+    active_connections = 0
+
+
+class _FakeService:
+    def __init__(self, *, slow: bool = False, fail: bool = False) -> None:
+        self.is_paused = False
+        self.pause_calls = 0
+        self.resume_calls = 0
+        self._slow = slow
+        self._fail = fail
+        self.gate: asyncio.Event | None = None
+
+    async def pause(self) -> None:
+        self.pause_calls += 1
+        if self._fail:
+            raise RuntimeError("暂停炸了")
+        if self._slow and self.gate is not None:
+            await self.gate.wait()  # 模拟慢收尾（旧 10s 卡顿形态）
+        self.is_paused = True
+
+    async def resume(self) -> None:
+        self.resume_calls += 1
+        self.is_paused = False
+
+    def snapshot(self) -> _FakeSnapshot:
+        return _FakeSnapshot()
+
+
+class _FakeTray:
+    def __init__(self) -> None:
+        self.states: list[str] = []
+        self.counts: list[int] = []
+
+    def set_state(self, state: str) -> None:
+        self.states.append(state)
+
+    def update_client_count(self, count: int) -> None:
+        self.counts.append(count)
+
+
+class TestTogglePause:
+    async def test_pause_then_resume_updates_text_by_actual_state(self) -> None:
+        from rdc.ui.session import _toggle_pause
+        from rdc.ui.tray import TrayState
+
+        svc, tray, lock = _FakeService(), _FakeTray(), asyncio.Lock()
+        await _toggle_pause(svc, tray, lock)  # type: ignore[arg-type]
+        assert svc.pause_calls == 1 and tray.states == [TrayState.PAUSED]
+        await _toggle_pause(svc, tray, lock)  # type: ignore[arg-type]
+        assert svc.resume_calls == 1 and tray.states == [TrayState.PAUSED, TrayState.RUNNING]
+
+    async def test_second_click_dropped_while_toggle_in_flight(self) -> None:
+        """锁防抖：上一次 pause 未结束（旧卡顿形态）再点直接丢弃，不重复下发。"""
+        from rdc.ui.session import _toggle_pause
+        from rdc.ui.tray import TrayState
+
+        svc = _FakeService(slow=True)
+        svc.gate = asyncio.Event()
+        tray, lock = _FakeTray(), asyncio.Lock()
+        first = asyncio.ensure_future(_toggle_pause(svc, tray, lock))  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)  # 让 first 进入 pause 挂起点
+        await _toggle_pause(svc, tray, lock)  # 重入：即刻丢弃
+        svc.gate.set()
+        await first
+        assert svc.pause_calls == 1, "重入点击不得重复下发暂停"
+        assert tray.states == [TrayState.PAUSED]
+
+    async def test_failure_falls_back_to_actual_state_no_raise(self) -> None:
+        """pause 抛错：异常不冒泡回 Qt 槽；文案按实际 is_paused（未暂停）刷新。"""
+        from rdc.ui.session import _toggle_pause
+        from rdc.ui.tray import TrayState
+
+        svc, tray, lock = _FakeService(fail=True), _FakeTray(), asyncio.Lock()
+        await _toggle_pause(svc, tray, lock)  # type: ignore[arg-type]
+        assert tray.states == [TrayState.RUNNING], "失败后服务仍在运行，文案不得谎报已暂停"
