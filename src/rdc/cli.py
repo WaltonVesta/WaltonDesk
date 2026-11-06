@@ -27,6 +27,7 @@ from typing import Any
 
 from rdc import __version__
 from rdc.config.settings import Settings, load_settings, save_settings
+from rdc.console_safety import stdin_is_absent, stdin_is_tty
 from rdc.logging import get_logger
 from rdc.security.password_policy import check_password, policy_error_text
 
@@ -233,7 +234,7 @@ def _run_control(args: argparse.Namespace) -> int:
 
 
 def _cli_password() -> str:
-    if not sys.stdin.isatty():
+    if not stdin_is_tty():
         print("非交互终端：无法索取口令（被控端未设密码时可忽略本提示）", file=sys.stderr)
         return ""
     return getpass.getpass("被控端口令: ")
@@ -241,7 +242,7 @@ def _cli_password() -> str:
 
 def _cli_fingerprint(fingerprint: str, host: str) -> bool:
     print(f"首次连接 {host}，证书指纹：\n  {fingerprint}\n请核对后确认。")
-    if not sys.stdin.isatty():
+    if not stdin_is_tty():
         return False  # 非交互默认拒绝（TOFU 安全口径）
     return input("信任该指纹? [y/N] ").strip().lower() == "y"
 
@@ -252,7 +253,7 @@ def _run_set_password(args: argparse.Namespace) -> int:
 
     password = args.password
     if password is None:
-        if not sys.stdin.isatty():
+        if not stdin_is_tty():
             print("非交互终端且未提供 --password，退出", file=sys.stderr)
             return 2
         password = getpass.getpass("新口令（≥8 位，含字母+数字）: ")
@@ -260,7 +261,11 @@ def _run_set_password(args: argparse.Namespace) -> int:
     if issues:
         print(policy_error_text(issues), file=sys.stderr)
         return 2
-    confirm = getpass.getpass("再次输入确认: ") if (args.password is None and sys.stdin.isatty()) else password
+    confirm = (
+        getpass.getpass("再次输入确认: ")
+        if (args.password is None and stdin_is_tty())
+        else password
+    )
     if confirm != password:
         print("两次输入不一致，未保存", file=sys.stderr)
         return 2
@@ -283,6 +288,20 @@ def _asyncio_run(coro: object) -> int:
         return 0
 
 
+def _gui_launch_expected() -> bool:
+    """无子命令时是否应当直接起 GUI（走查第十二批打包守卫关键判定）。
+
+    三态不可合并（上次"死逻辑"回归的根源）：
+
+    - ``sys.stdin`` 是终端 → 交互用户，起 GUI；
+    - ``sys.stdin is None`` → **无控制台**（PyInstaller ``--windowed`` /
+      pythonw）：这是双击图标的桌面用法，**必须**起 GUI；若与下一态合并成
+      "非终端"，产物只会打印帮助后退出，表现为"窗口再也不出现"；
+    - ``stdin`` 存在但非 tty（管道/重定向、CI）→ 不是交互用户，打印帮助。
+    """
+    return stdin_is_tty() or stdin_is_absent()
+
+
 def main(argv: list[str] | None = None) -> int:
     """程序主入口。
 
@@ -300,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_control(args)
     if args.command == "set-password":
         return _run_set_password(args)
-    if args.command is None and (args.gui or (sys.stdin.isatty() and _has_display())):
+    if args.command is None and (args.gui or (_gui_launch_expected() and _has_display())):
         return _run_gui()
     parser.print_help()
     return 0

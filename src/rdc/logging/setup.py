@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 from collections.abc import MutableMapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -27,6 +26,7 @@ from typing import Any
 import structlog
 
 from rdc.config import paths
+from rdc.console_safety import console_stream, stdout_is_tty
 
 __all__ = ["configure_logging", "get_logger"]
 
@@ -128,7 +128,7 @@ def configure_logging(level: str = "INFO", *, log_file: Path | None = None) -> l
         log_file, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8"
     )
     file_handler.setLevel(logging.DEBUG)
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(console_stream())
     console_handler.setLevel(level_num)
 
     timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False)
@@ -164,7 +164,7 @@ def configure_logging(level: str = "INFO", *, log_file: Path | None = None) -> l
             processors=[
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
                 structlog.processors.format_exc_info,
-                structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()),
+                structlog.dev.ConsoleRenderer(colors=stdout_is_tty()),
             ],
             foreign_pre_chain=shared,
         )
