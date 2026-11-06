@@ -1,6 +1,6 @@
 # STAGE9_REPORT.md — 阶段 9：安全加固 + 装配 ✅ 完成
 
-> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）+ 键盘标点/Tab·Win 泄漏 + 封禁告知竞态 + 异常断连卡键 + 断连回调已删窗 + 封禁倒计时（六批详见 §6 走查记录） · 2026-10-17 第六批复测回归修复 VkKeyScanW argtypes 缺失（§6） · 2026-10-17 走查第九批修复 Win 键释放被系统吞掉致被控端卡键（§6，v5.0.0 应急兜底 + README 已知限制） · 2026-10-17 走查第十批修复 Tab/Backtab 被 Qt 焦点链提前消费致控制态泄漏（§6，视图覆写 + 应用级守卫双层） · 2026-10-17 走查第十一批修复被控端运行中改分辨率画面不跟随（§6，采集层几何漂移检测 + 全链无感自适应） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1508 passed / 2 skipped → 复测回归修复后 1511 passed / 2 skipped → 第九批后 1518 passed / 2 skipped → 第十批后 1523 passed / 2 skipped → 第十一批后 1535 passed / 2 skipped（三绿退出码 0）
+> 日期：2026-10-03 收口 · 2026-10-04 走查第一轮修复 GUI 启动 bug · 2026-10-05 走查第二轮修复 launcher→主窗切换崩溃 bug · 2026-10-06 走查第三轮修复奇数分辨率编码器崩溃 bug · 2026-10-07 走查第四批修复认证流程三项缺陷 · 2026-10-07 走查第五批修复画面缩放策略 · 2026-10-08 走查第六批修复 UAC 安全桌面画面永久停摆（P0）+ 键盘标点/Tab·Win 泄漏 + 封禁告知竞态 + 异常断连卡键 + 断连回调已删窗 + 封禁倒计时（六批详见 §6 走查记录） · 2026-10-17 第六批复测回归修复 VkKeyScanW argtypes 缺失（§6） · 2026-10-17 走查第九批修复 Win 键释放被系统吞掉致被控端卡键（§6，v5.0.0 应急兜底 + README 已知限制） · 2026-10-17 走查第十批修复 Tab/Backtab 被 Qt 焦点链提前消费致控制态泄漏（§6，视图覆写 + 应用级守卫双层） · 2026-10-17 走查第十一批修复被控端运行中改分辨率画面不跟随（§6，采集层几何漂移检测 + 全链无感自适应） · 2026-11-06 走查第十二批修复暂停/恢复/重启画面闭环（Bug 12/14/15，同一病灶链）+ 初次连接死循环（Bug 19）+ 双击退化（Bug 16）+ PyInstaller --windowed 打包守卫防御式重写 + 新增开机自启（Feature 17）与初始密码策略（Feature 18）（§6 第十二批） · 任务书基线 `efd38a0`（1137 passed）→ 收口 1417 passed / 2 skipped → 走查修复后终态 1508 passed / 2 skipped → 复测回归修复后 1511 passed / 2 skipped → 第九批后 1518 passed / 2 skipped → 第十批后 1523 passed / 2 skipped → 第十一批后 1535 passed / 2 skipped（三绿退出码 0）
 > 范围：v4.0.3 → v5.0.0 重构的阶段 9（**阶段 8 文件传输+音频经用户决定延后**）
 > 配套：`STAGE9_PLAN.md`（执行方案）、`STAGE9_CHECKLIST.md`（真机走查清单）、`SECURITY_BASELINE.md`（批 0 扫描基线）
 
@@ -274,6 +274,34 @@ v4 行为差异（线程模型→单事件循环协程、裸 4B 握手→15B 分
 
 全量 **1535 passed / 2 skipped**（1523 + 12），三绿退出码 0。落点取舍记录：修复放**采集层**而非 pipeline 比对 `frame_size`——`capture_into` 校验、`current_monitor`/`frame_size` 消费方、输入坐标 `to_local` 换算全部以选择器为单一事实源，重建采集源一处对齐、处处对齐；mss `.monitors` 缓存无公开失效 API，换句柄是唯一"官方姿势"（与 P0 批 UAC 自愈同路径复用）。
 
+### 第十二批：暂停/恢复/重启画面闭环 + 初次连接死循环 + 双击退化 + 打包守卫 + 开机自启/初始密码（2026-11-06）
+
+本批一次接手收尾：用户报 Bug 12/14/15/16/19 五项 + 新增 Feature 17（开机自启）/Feature 18（初始密码策略），并要求"防御式重写 `sys.stdout/isatty` 打包守卫"（此前手改 `cli.py`/`setup.py` 死逻辑曾引发"GUI 丢标题栏 + 初次连接死循环"副作用，已 `git checkout` 回退）。五项 bug 逐条独立 commit，两项 Feature 因共享 `tray.py`/`session.py` 装配文件、协同开发至全绿合并为一条 feature commit。
+
+**Bug 12 & 14 & 15：暂停无提示 / 恢复后画面卡死 / 重启 serve 后画面卡死——同一病灶链三处（P1，commit `cb68ce3`）**。真机：托盘点"暂停"→主控端画面卡住、按钮未禁用、无提示（12）；点"恢复"→控制可用但画面永久卡在最后一帧（14）；被控端重启 serve 主控端重连→控制恢复画面仍卡死（15）。按用户提示的"Broadcaster 订阅清理 + pipeline 差分复位"方向排查，定位三处病灶（两方向均命中并发现第三处）：
+
+| 病灶 | 根因 | 修复 |
+|---|---|---|
+| ①（14/15 主导） | `SubscriptionRegistry` 由 `HostService` **构造期建一次**跨 pause/resume/restart 复用；`_teardown_runtime` 必经 `registry.shutdown()` → `ScreenBroadcaster._stopped=True` **永久置位** → 恢复后新画面订阅 `register()` 抛"已停止" → 服务端画面会话建立即关 → 主控端只收 screen EOF、画面停在最后一帧（控制通道独立存活，故"控制可用画面不恢复"） | registry 改**每运行周期重建**（`_new_registry()` 在 `start()` 内、TransportServer 开闸后、构造管线前——管线 broadcaster 必须与本表同实例） |
+| ②（14/15 次要） | `pipeline.close()` 连带 `source.close()`（契约正确），resume/restart 复用同一源 → 新管线每帧 capture 抛"已关闭" | `MssScreenSource.reopen()`（复用 `_rebuild_backend` 新句柄、保留选屏索引，同 P0 自愈/第十一批重建路径）+ `ArrayScreenSource` 对称；`start()` 经 `getattr` 探测调用，无 reopen 面替身源行为逐字节不变 |
+| ③（12） | `pause()` 静默拆会话，主控端零通知 | proto 枚举**只增** `HOST_STATUS_PAUSED=3`（pb 重生成、字节快照兼容、协议测试全过），`pause()` 拆会话**前**向活动控制会话 gather 下行；controller 派 `paused=` 事件；MainWindow 经统一开关入口禁控 + 同步按钮 + 状态栏"远端已暂停服务" |
+
+**哨兵·画面闭环 9 项**：集成 3（`TestPauseResumeScreenFlow`：暂停 PAUSED 下行 / 恢复后真实帧流 / 重启后订阅登记与帧流——stash 回退 src 三处后 **3 全红**）+ 采集源 2（reopen 新句柄出帧 + 选屏保留，句柄计数断言）+ UI 1（暂停提示 + 控制禁用 + 按钮回滚）+ controller 1（PAUSED 派发）+ 既有 `host_status` 断言按新签名适配 2。
+
+**Bug 16：快速双击退化为单击（P2，commit `f7aa867`）**。offscreen 探针实测锁定根因**在 UI 分发层而非 coalesce 时间窗/缩放映射**（用户提示两方向经实测排除）：Qt 把双击窗口内**第二次按下**分发为 `mouseDoubleClickEvent`、不再触发 `mousePressEvent`，`ScreenView` 未覆写 → 第二击 press 永久丢失，远端收 down/up/(丢)/up，孤立 release 不成击。修复：覆写 `mouseDoubleClickEvent` 与 press 同语义转发（含抓焦）。哨兵 2：UI 真实事件流 press/release/press/release 四事件成对有序（病灶第三事件缺失转红）+ coalesce 跨节拍"只分批不打散 down/up"（seq 单调）。
+
+**Bug 19：初次连接未开被控端的 IP → 无限重连、界面像死机（P1，commit `b95fad4`，用户新报）**。连没开被控端的机器抛 `ConnectionRefusedError`，旧 `connect()` 按 `auto_reconnect` 起环每 2s 盲试，UI 卡"重连中"、按钮禁用、零提示。修复：`connect()` **网络类首连失败绝不进重连环**——落定 disconnected 上抛（重连仅服务**会话期链路死亡** `_on_link_dead`，auto_reconnect 功能不削弱）；UI 网络失败分支落定断开 + 人话原因 + **非模态弹窗**（被拒→"对方未开启被控端"），按钮即时恢复。哨兵 4：controller 3（refused 不起环 / 任意 OSError 不起环 / **会话期判死仍起环边界对照**防误读为重连被砍）+ UI 1；旧语义 2 用例（`test_connect_network_failure_*`/`test_connect_failure_with_auto_reconnect`）按新契约改写、stash 病灶转红。
+
+**打包守卫：`sys.stdout/isatty` 防御式重写（commit `0367dca`）**。`--windowed` 下 `sys.stdout/stdin` 为 `None`，裸 `isatty()` 崩。新写 `rdc.console_safety`：`is_tty`（getattr+callable+try 探测，取不到答案保守落 False 且 stderr 留痕不静默）、`console_stream`（stdout 存在时**原对象身份返回**、仅 None 换 `_NullStream`）、`stdin_is_absent`。关键防回归：GUI 启动判定 = `stdin_is_tty() or stdin_is_absent()`——windowed（stdin None，双击桌面）**必须起 GUI**，管道/重定向维持打印帮助（上次合并两态成"非终端不起 GUI"正是"窗口永不出现"病灶）。`logging/setup.py` handler 目标与 colors 走守卫（正常终端逐字节不变）；`print` 无需改（CPython 对 stdout=None 本就静默）。哨兵 13（None 流判定/日志装配可发/真流身份不变/三态启动判定/CLI 函数不崩），回退接入点 3 项复现崩溃转红。
+
+**Feature 17 开机自启 + Feature 18 初始密码（P2，commit `60ae150`，共享 UI 装配、协同至全绿合并一条）**。
+- **F18**：`secrets.password.generate_initial_password`（CSPRNG `secrets` 随机 8 位、必含大小写+数字、排除易混字形 0O1Il、满足 `password_policy` 全部规则）；新模块 `server/initial_password`（零 Qt、纯函数、可无 GUI 测）：`ensure_host_password` 首启无口令时生成 + bcrypt 落哈希 + **明文进平台密钥库（DPAPI），绝不落 `config.json`**（渗透 S4 判定其为外部可写面），密钥库不可用只放弃回显、**不降级明文落盘**；`initial_notice_text` 供控制台/Launcher/托盘气泡单一文案源。Settings 两布尔 `password_autogenerated`/`initial_password_notice_suppressed`。CLI `serve` 首启生成落盘（写回 `--config` 同源文件，修便携丢口令）+ banner 显眼回显（`--silent` 跳过）；`set-password` 改密清自动生成态 + 删明文。GUI `host_session` 生成 + 托盘气泡显眼展示 + 点击气泡=不再提示持久化 + 托盘"修改密码…"→ 新 `ChangePasswordDialog`（非模态协程、实时强度校验、两次一致）→ 重启生效。**日志无明文核验**：`initial_password` 全部 `_LOG.*` 仅事件名+错误码，口令变量绝不入日志（正面支撑未测项 7.3）。
+- **F17**：`host/autostart` 重写——命令统一 `serve --tray --silent`（v4 病灶 `--service` 参数在 v5 CLI 根本不存在，开机后落入无子命令分支弹 Launcher）；frozen/pythonw 双形态；`launch_command` 纯函数 + `_winreg` 函数内 import（测试经 `sys.modules` 注入假 winreg，绝不触真实注册表）。UI：Launcher + 托盘右键"开机自启（静默被控端）"勾选，注册失败回滚勾选并 emit(ok=False)。兑现 `rdc.host.autostart` 移出 mypy 宽松清单（补全注解，strict 0 error）。哨兵 46：`test_initial_password` 14 + `test_cli_initial_password` 8 + `test_host_autostart` 10 + `test_ui_autostart_password` 14。
+
+全量 **1605 passed / 2 skipped**（1535 + 70 哨兵：Bug19 +2、Bug16 +2、画面闭环 +9、守卫 +13、F17/F18 +46；另若干既有用例按新语义改写不计新增），三绿退出码 0；mypy 源文件 99→102（+console_safety/+initial_password/+change_password_dialog）；bandit High/Medium/Low 复扫归零（新代码 0 条未抑制告警，Linux `subprocess` 拆字面 argv 消除虚标 B607）。**controller 零 Qt/Widgets 红线复验通过**（改动全在 CLI/UI/secrets 层，controller 仅新增纯映射）。**副作用自查**：本批曾以一次性冒烟命令向真实密钥库写入一条测试口令，随即用存储 API 精确删除（`config.json` 全程未改、口令哈希保持原空态），真实数据根恢复干净。
+
+**第十二批重测预期**：① 托盘暂停→主控端状态栏"远端已暂停服务"、控制自动取消勾选、画面冻结；恢复后重连画面**继续流动**（不卡旧帧）；② 被控端重启 serve→主控端重连画面自动续流；③ 快速双击远端文件夹→正常打开；④ 连没开被控端的 IP→弹窗"对方未开启被控端"、按钮立即可重试、绝不无限重连；⑤ `--windowed` 打包双击图标→正常弹窗口（标题栏正常）、无 isatty 崩溃；⑥ 全新配置首次起被控端→控制台/托盘气泡显眼打印随机 8 位初始密码 + 建议修改，改密后不再提示；勾"开机自启"重启虚拟机→被控端**静默后台启动**（不弹 Launcher）。
+
 **走查其余项**：第五批修复后 1.2 画面显示完整闭环（缩放策略 + 奇数分辨率 + 认证体验）；第六批修复后 **UAC 场景**（1.2）、**键盘标点/Tab/Win**（2.7/3.x）、**封禁体验**（1.4）、**异常断开卡键**（1.7）待重测（窗口模式 + UAC → 状态栏提示"安全桌面（UAC 确认中），画面暂停" → 结束后自动恢复；封禁期连接按钮禁用带倒计时）。**键盘标点已复测一次**：检出 `71cf4a5` 配套遗漏（`_VkKeyScanW` argtypes 缺失）致标点全灭，已二次修复（`333ab13`，见上"复测回归"段）。**Win 键同批复测另立第九批**：第六批的抓焦修复解决的是"Win 触发**主控端**开始菜单"（泄漏），复测确认**被控端**仍卡按住——根因是系统吞掉释放事件（焦点修复救不了，事件根本不投递），已按第九批落 2s 超时补发兜底（`8fd2ab1`）。**第九批修复后 Win 键重测预期**：按一次 Win → 被控端约 2s 内自动松开（后续按键不再变 Win+组合），但**开始菜单不会在被控端弹出**、`Win+X/Q/W/V` 仍被主控端系统消费不转发（v5.0.0 已知限制，README 同口径；完整支持归 v5.1.0）。**第九批复测通过（标点/Win/其余键盘全 ✅），Tab 残留另立本第十批**（`fd6d1ad`）：**第十批修复后 Tab 重测预期**：控制开启时按 Tab/Shift+Tab → 虚拟机焦点移动（表单/窗口内切焦点），主机 GUI 焦点**不再**跳转；控制关闭时主机 Tab 导航如常。**第十一批（改分辨率画面不跟随）重测预期**：会话中在虚拟机里改被控端分辨率（1920x1080→1280x720 或反向）→ **约 2s 内**主控端画面自动按新尺寸等比重算缩放，全程无需刷新/重连/手动干预（采集层几何漂移检测自动重建；放大方向旧画面右下未定义内容同样被新帧覆盖）；被控端切回原分辨率同样自动跟随（清单新增 4.7 项口径）。封禁阈值维持 3 次/5 分钟不变（缺陷 3 修复后计数语义已恢复"点击数=失败数"，且阈值已是 Settings 字段 `max_auth_attempts`/`auth_ban_duration`，用户如需放宽改配置即可）；再发现 ❌ 项按同一方式处理。性能"卡"问题已确认属虚拟机瓶颈，不进走查阻塞项，留阶段 10 物理机验证。
 
 ## 7. 验收数据收口
@@ -285,7 +313,7 @@ pytest: 1417 passed, 2 skipped, exit 0
         （任务书基线 1137 → 批 4 1382 → 批 5 +35：e2e 1 + 渗透 19(+2 skip) + 覆盖率补测 15）
 bandit: High 0 / Medium 0 / Low 0（全部 nosec 抑制，附理由）
 pip-audit: 0 vulnerabilities
-（收口后走查修复终态：pytest 1508 passed / 2 skipped，+47 为六批走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1 + 第六批 23〔P0 21 项含新增 desktop.py 探针模块 + Bug2-6 逐项〕，另有若干既有用例按新语义适配改写）；mypy 源文件数 98→99（第六批 P0 新增 `capture/desktop.py` 桌面探针）。第六批 Bug2 复测回归修复后再 +3（argtypes 锁定 + 装载区声明完整性审计 + 真机 VkKeyScanW 调用哨兵）达 1511 passed / 2 skipped；**走查第九批（Win 释放丢失）再 +7**（粘滞热键对账 6 + 主窗释放成对转发 1，另 1 项既有用例改名扩写），终态 **1518 passed / 2 skipped**、三绿退出码 0。**走查第十批（Tab 焦点链泄漏）再 +5**（`TestTabFocusGuard`：画面/工具栏两焦点场景成对转发 + Shift+Tab + 控制关闭不伤导航 + 视图覆写直调契约），达 1523 passed / 2 skipped；**走查第十一批（动态分辨率）再 +12**（探针 3 + 采集几何漂移 6〔含无探针病灶基线对照〕+ 管线端到端 1 + controller 解码器 1 + view 重算 1），终态 **1535 passed / 2 skipped**、三绿退出码 0。controller 零 Qt/Widgets 导入红线**第九批改动后复验通过**（新增逻辑仅用本地整型键码表与注入时钟，grep `PySide6|QtWidgets|QtCore|QtGui` 仍零命中；第十批改动全在 UI 层、第十一批在采集/服务层均不触及）。详见 §6）
+（收口后走查修复终态：pytest 1508 passed / 2 skipped，+47 为六批走查哨兵（第一轮 2 + 第二轮 1 + 第三轮 8 + 第四批 12 + 第五批 1 + 第六批 23〔P0 21 项含新增 desktop.py 探针模块 + Bug2-6 逐项〕，另有若干既有用例按新语义适配改写）；mypy 源文件数 98→99（第六批 P0 新增 `capture/desktop.py` 桌面探针）。第六批 Bug2 复测回归修复后再 +3（argtypes 锁定 + 装载区声明完整性审计 + 真机 VkKeyScanW 调用哨兵）达 1511 passed / 2 skipped；**走查第九批（Win 释放丢失）再 +7**（粘滞热键对账 6 + 主窗释放成对转发 1，另 1 项既有用例改名扩写），终态 **1518 passed / 2 skipped**、三绿退出码 0。**走查第十批（Tab 焦点链泄漏）再 +5**（`TestTabFocusGuard`：画面/工具栏两焦点场景成对转发 + Shift+Tab + 控制关闭不伤导航 + 视图覆写直调契约），达 1523 passed / 2 skipped；**走查第十一批（动态分辨率）再 +12**（探针 3 + 采集几何漂移 6〔含无探针病灶基线对照〕+ 管线端到端 1 + controller 解码器 1 + view 重算 1），终态 **1535 passed / 2 skipped**、三绿退出码 0。controller 零 Qt/Widgets 导入红线**第九批改动后复验通过**（新增逻辑仅用本地整型键码表与注入时钟，grep `PySide6|QtWidgets|QtCore|QtGui` 仍零命中；第十批改动全在 UI 层、第十一批在采集/服务层均不触及。**走查第十二批（2026-11-06，§6 第十二批段）再 +70**：Bug19 双向 2〔首连不起环 / 任意 OSError 不起环〕+ 会话期判死仍起环边界对照 1 + UI 弹窗 1 + Bug16 双击 2 + 画面闭环集成 3（`TestPauseResumeScreenFlow`）+ 采集源 reopen 2 + 暂停 controller/UI 2 + 打包守卫 13（`test_console_safety`）+ Feature 17/18 46（初始口令 14 + CLI 接线 8 + 自启 10 + 自启/改密 UI 14）；另若干既有用例按新语义改写不计新增（`host_status` 签名、旧首连重连用例），终态 **1605 passed / 2 skipped**、三绿退出码 0；mypy 源文件 99→**102**（+`rdc.console_safety`、+`rdc.server.initial_password`、+`rdc.ui.change_password_dialog`）；bandit 复扫 High/Medium/Low **全 0**（Feature 新代码 0 条未抑制告警，Linux `subprocess.run` 拆字面 argv 消除虚标 B607；`rdc.host.autostart` 移出 mypy 宽松清单兑现 strict 0 error）；controller 零 Qt 红线第十二批复验仍零命中（改动全在 CLI/UI/secrets/采集服务层）。详见 §6）
 覆盖率: 总体 89.7%（验收线 ≥70%）
   核心清单（protocol/transport/encoding/server auth+banlist/secrets/config migration）全部 ≥85%；
   批 5 补齐两处缺口：transport/screen_channel 80.3→100%、transport/server 81.3→95.7%
@@ -305,7 +333,7 @@ pip-audit: 0 vulnerabilities
 
 | # | 项 | 归属 |
 |---|---|---|
-| 1 | 真机走查 45 项：**已回报九批**（第一~六批 + 第六批复测回归 + 第九批 + 第十批 + 第十一批）——第一轮 1.1 GUI 启动、第二轮 launcher→主窗切换崩溃、第三轮 1.2 奇数分辨率编码器崩溃、第四批认证三缺陷（错口令无提示/封禁无感知/一次点击双重认证）、第五批 1.2 画面缩放策略、第六批 P0 UAC 安全桌面画面永久停 + Bug2-6（键盘标点/Tab·Win 泄漏、封禁告知竞态、异常断连卡键、断连回调已删窗、封禁倒计时）均已修复（§6）；第六批 Bug2 复测检出配套遗漏（argtypes 缺失）已二次修复 `333ab13`；**第九批复测通过**（标点/Win 2s 兜底/其余键盘全 ✅）；**第九批 Win 释放丢失已落 2s 应急兜底（`8fd2ab1`），完整钩子归 v5.1.0，README 已记已知限制**；**第十批 Tab/Backtab 被 Qt 焦点链提前消费（`fd6d1ad`，视图覆写+应用级守卫双层）已修**；**第十一批被控端运行中改分辨率画面不跟随（`6f58c46`，采集层几何漂移检测，全链无感跟随，无需手动刷新）已修**；哨兵累计 **74 项入仓**（六批 47 + 复测 3 + 第九批 7 + 第十批 5 + 第十一批 12；第九批主窗第 2 项系既有用例改名扩写，不计新增）；待用户重测确认：1.2 窗口模式/UAC、1.3/1.4 认证与封禁体验、1.7 异常断开、**2.7/3.x 键盘复测结论（第十批 Tab 修复 + 第九批 Win 兜底）——按清单 3.10/3.7 口径验收**、**4.7 动态分辨率（清单新增项：会话中改虚拟机分辨率约 2s 自动跟随）**；4.x/5.x/6.x/7.x 其余走查结果待继续回报 | 走查进行中 |
+| 1 | 真机走查 45 项：**已回报十二批**（第一~六批 + 第六批复测回归 + 第九批 + 第十批 + 第十一批 + 第十二批）——第一轮 1.1 GUI 启动、第二轮 launcher→主窗切换崩溃、第三轮 1.2 奇数分辨率编码器崩溃、第四批认证三缺陷（错口令无提示/封禁无感知/一次点击双重认证）、第五批 1.2 画面缩放策略、第六批 P0 UAC 安全桌面画面永久停 + Bug2-6（键盘标点/Tab·Win 泄漏、封禁告知竞态、异常断连卡键、断连回调已删窗、封禁倒计时）均已修复（§6）；第六批 Bug2 复测检出配套遗漏（argtypes 缺失）已二次修复 `333ab13`；**第九批复测通过**（标点/Win 2s 兜底/其余键盘全 ✅）；**第九批 Win 释放丢失已落 2s 应急兜底（`8fd2ab1`），完整钩子归 v5.1.0，README 已记已知限制**；**第十批 Tab/Backtab 被 Qt 焦点链提前消费（`fd6d1ad`，视图覆写+应用级守卫双层）已修**；**第十一批被控端运行中改分辨率画面不跟随（`6f58c46`，采集层几何漂移检测，全链无感跟随，无需手动刷新）已修**；**第十二批（2026-11-06）修复暂停无提示/恢复画面卡死/重启画面卡死（Bug 12/14/15 同一病灶链三处：registry 每周期重建 + 采集源 reopen + HostStatus PAUSED 下行，`cb68ce3`）、初次连接无限重连死循环（Bug 19 首连网络失败不起环 + 弹窗，`b95fad4`）、双击退化单击（Bug 16 Qt 第二次按下走 dbl 事件漏转发，`f7aa867`），并防御式重写打包守卫（`0367dca`）、交付开机自启（Feature 17）+ 初始密码策略（Feature 18）合并 commit `60ae150`**；哨兵累计 **144 项入仓**（六批 47 + 复测 3 + 第九批 7 + 第十批 5 + 第十一批 12 + 第十二批 70；第九批主窗第 2 项系既有用例改名扩写，不计新增）；待用户重测确认：1.2 窗口模式/UAC、1.3/1.4 认证与封禁体验、1.7 异常断开、2.7/3.x 键盘复测结论（第十批 Tab + 第九批 Win 兜底，按清单 3.10/3.7 口径）、4.7 动态分辨率（清单新增项，约 2s 自动跟随）、**第十二批 6 项预期见 §6 末"第十二批重测预期"**（① 托盘暂停→主控端提示 + 控制禁用 + 恢复后画面续流；② 被控端重启 serve→重连画面续流；③ 快速双击→正常打开文件夹；④ 连未开被控端 IP→弹窗"对方未开启被控端"、按钮即时可重试、绝不无限重连；⑤ `--windowed` 打包双击图标→窗口正常出现无 isatty 崩溃；⑥ 全新配置首启→显眼打印初始密码 + 改密后不再提示 + 勾开机自启重启静默启动）、**未测项 7.1 弱口令 / 7.3 日志无明文**（本批 F18 已核验口令明文绝不入 `_LOG`，正面支撑 7.3，仍需用户真机走查确认）；4.x/5.x/6.x/7.x 其余走查结果待继续回报 | 走查进行中 |
 | 2 | 符号链接逃逸实测用例在本机 skip（非管理员无 symlink 权限），CI/开发者模式环境自动生效 | 阶段 10 CI |
 | 3 | 硬编选项映射为空（`_hardware_options` 不发明参数），硬件编码器真正启用需逐卡标定 | 阶段 10 |
 | 4 | qasync 官方声明 <3.14；本机 3.14.3 四判据实测通过，3.16 时切换 PoC 保留方案乙 | 阶段 10 / 环境升级 |
@@ -320,6 +348,12 @@ pip-audit: 0 vulnerabilities
 按 `REFACTOR_PLAN.md` §阶段 10：本机 PyInstaller -D 打包并验证冷启动（<2s 验收线，无 C 编译器约束 Q1 方案 A）、Nuitka 配置交付 CI、更新通道（git 无 remote → 本地 HTTP 模拟 Release 验收 Q5）、GUI 安装物与卸载、macOS/Linux 平台代码 CI 补验（R6）。
 
 进场携带：§8 遗留 1（走查结果）、遗留 (a)(b) 的归属阶段决策确认；性能基线沿用（libx264 4K 11.2ms/帧、桌面场景 H.264 比 JPEG 降 96%、硬编不可用探测必须实测）。
+
+**第十二批收口补充（打包口径，阶段 10 直接可用）：**
+- `--windowed` 崩溃面已由 `rdc.console_safety` 守卫（`sys.stdout/stdin is None` → 日志装配与 isatty 判定不崩、无参启动仍起 GUI）；`setup.py` **未改**（上批事故的死逻辑改动已回退且不再需要——守卫全部落在 `src/` 内，spec 保持默认）。
+- **Feature 17 自启与打包形态天然契合**：`AutostartManager` frozen 探测 → 注册 `"{exe}" serve --tray --silent`；阶段 10 出包后自启项自动切 exe 路径，无需另改。打包冒烟务必验"双击 exe 出窗口 + 勾自启后开机静默起被控端"两条（第十二批预期 ⑤/⑥）。
+- **Feature 18 首启依赖 DPAPI**：`--windowed` 下密钥库（crypt32）可用，明文只进 `secrets.dpapi.json` 不进 config；若目标机 DPAPI 不可用则降级"不持久化初始明文"（横幅当次仍显示，重开则不可再取——打包说明需提示用户首启记下密码或立即改密）。
+- proto 本批只增枚举 `HOST_STATUS_PAUSED=3`（pb 已重生成，字节快照兼容）；打包 spec 无需新增 hidden-import 面（新模块 `console_safety`/`initial_password`/`change_password_dialog` 均常规 import 链）。
 
 ---
 

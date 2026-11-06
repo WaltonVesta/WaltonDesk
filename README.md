@@ -14,7 +14,9 @@
 
 ## 版本状态
 
-当前处于 **v4.0.3 → v5.0.0 重构阶段 9 ✅ 完成（安全加固 + 装配）**，下一步 **阶段 10（打包发布）**。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)，阶段 9 交付见 [`STAGE9_REPORT.md`](STAGE9_REPORT.md)。
+当前处于 **v4.0.3 → v5.0.0 重构阶段 9 ✅ 完成（安全加固 + 装配）**，真机走查已修复第十二批问题并交付开机自启（Feature 17）与初始密码策略（Feature 18），下一步 **阶段 10（打包发布）**。重构进度见 [`PROGRESS.md`](PROGRESS.md)，计划见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md)，现状评估见 [`ASSESSMENT.md`](ASSESSMENT.md)，阶段 9 交付见 [`STAGE9_REPORT.md`](STAGE9_REPORT.md)。
+
+**被控端首次运行**会自动生成随机 8 位强口令并在控制台/托盘气泡显眼打印（建议登录后立即在设置或托盘"修改密码"改为自己的口令）。托盘与启动菜单提供"开机自启（静默被控端）"开关；自启形态下不弹启动菜单。`rdc serve --tray --silent` 为开机自启使用的静默命令。
 
 ## 协议兼容性
 
