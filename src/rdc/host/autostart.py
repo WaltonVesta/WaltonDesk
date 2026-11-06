@@ -1,198 +1,288 @@
-﻿"""
-开机自启动（跨平台）
-Windows: 注册表
-macOS: launchd
-Linux: systemd
+﻿"""开机自启（走查第十二批 Feature 17 重写）。
+
+Windows: ``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`` 注册表值
+macOS: launchd LaunchAgent
+Linux: systemd user unit
+
+v4 遗留病灶（本批修复）：
+- 旧命令为 ``"{pythonw}" "{script}" --service``——v5 CLI **没有** ``--service``
+  参数，开机后落入"无子命令 → GUI 判定"分支弹出 Launcher，违背"自启必须
+  静默进被控端"的产品要求；
+- ``sys.argv[0]`` 在打包/模块启动下指向不稳（可能拿到临时引导脚本路径）。
+
+新命令口径（三平台统一子命令，静默 = ``serve --silent``：不打印控制台横幅；
+Windows 走 ``--tray`` 托盘常驻，用户仍可看到状态与初始密码气泡）：
+
+- frozen（PyInstaller）：``"{exe}" serve --tray --silent``
+- 源码/venv：``"{pythonw}" -m rdc serve --tray --silent``（pythonw 无控制台窗体）
+
+可测性：Windows 注册表读写集中在 ``_winreg()``（函数内 import，测试经
+``sys.modules`` 注入假模块）；命令组装独立成 :meth:`launch_command`，纯函数
+断言不触注册表。非 Windows 分支保持 v4 行为（本机不可测，CI 补验口径同
+阶段 7 范围决定）。
 """
 
-import os
+from __future__ import annotations
+
 import platform
 import sys
 from pathlib import Path
 
 from rdc.logging import get_logger
 
+__all__ = ["AutostartManager", "REGISTRY_RUN_KEY"]
+
+#: HKCU 自启动注册表位置（值名 = service_name）。
+REGISTRY_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+_LOG = get_logger("host.autostart")
+
+
+def _pythonw_interpreter(python_path: str) -> str:
+    """python.exe → pythonw.exe（无控制台窗口形态）；已是 pythonw/非 CPython
+    布局时原样返回。"""
+    if python_path.endswith("pythonw.exe"):
+        return python_path
+    candidate = python_path.replace("python.exe", "pythonw.exe")
+    if candidate != python_path and Path(candidate).exists():
+        return candidate
+    return python_path
+
 
 class AutostartManager:
-    """开机自启动管理器"""
-    
-    def __init__(self, service_name: str = "RemoteControlService"):
+    """开机自启动管理器（Windows 注册表 / macOS launchd / Linux systemd）。
+
+    Args:
+        service_name: 注册表值名 / plist 与 unit 文件名。
+        python_path: 解释器路径（测试注入）。
+        frozen: 是否打包形态（``None`` = 读 ``sys.frozen`` 事实；测试注入）。
+        exe_path: frozen 形态的可执行文件路径（``None`` = ``sys.executable``）。
+    """
+
+    def __init__(
+        self,
+        service_name: str = "RemoteControlService",
+        *,
+        python_path: str | None = None,
+        frozen: bool | None = None,
+        exe_path: str | None = None,
+    ) -> None:
         self.service_name = service_name
-        self.logger = get_logger()
-        self._script_path = os.path.abspath(sys.argv[0])
-        self._python_path = sys.executable
-    
+        self._python_path = python_path if python_path is not None else sys.executable
+        self._frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+        self._exe_path = exe_path if exe_path is not None else sys.executable
+
+    # -- 命令组装（纯函数，测试主断言面） ---------------------------------------
+
+    def launch_command(self) -> str:
+        """当前平台开机执行的完整命令串（Windows 为注册表值内容）。
+
+        静默三要素：子命令 ``serve`` 直进被控端（不弹 Launcher）；
+        ``--silent`` 不打印控制台横幅；Windows 用 pythonw/exe 本体（无黑窗）。
+        """
+        if self._frozen:
+            return f'"{self._exe_path}" serve --tray --silent'
+        interpreter = _pythonw_interpreter(self._python_path)
+        return f'"{interpreter}" -m rdc serve --tray --silent'
+
+    # -- 平台分发 ---------------------------------------------------------------
+
+    def is_enabled(self) -> bool:
+        """自启当前是否已注册（读取失败按 False，可观测）。"""
+        system = platform.system()
+        try:
+            if system == "Windows":
+                return self._query_windows()
+            if system == "Darwin":
+                return self._plist_path().exists()
+            return self._unit_path().exists()
+        except Exception as exc:  # noqa: BLE001 - 探测失败=未知，保守 False 且留痕
+            _LOG.warning("autostart_query_failed", system=system, error=repr(exc))
+            return False
+
     def install(self) -> bool:
-        """安装开机自启动"""
+        """安装开机自启动。"""
         system = platform.system()
         try:
-            if system == 'Windows':
+            if system == "Windows":
                 return self._install_windows()
-            elif system == 'Darwin':
+            if system == "Darwin":
                 return self._install_macos()
-            elif system == 'Linux':
+            if system == "Linux":
                 return self._install_linux()
-            else:
-                self.logger.warning(f"不支持的系统: {system}")
-                return False
-        except Exception as e:
-            self.logger.error(f"安装开机自启动失败: {e}")
+            _LOG.warning("autostart_unsupported_system", system=system)
             return False
-    
+        except Exception as exc:  # noqa: BLE001 - 边界：结果经返回值可观测，不静默
+            _LOG.error("autostart_install_failed", system=system, error=repr(exc))
+            return False
+
     def uninstall(self) -> bool:
-        """卸载开机自启动"""
+        """卸载开机自启动（未注册时视为成功，幂等）。"""
         system = platform.system()
         try:
-            if system == 'Windows':
+            if system == "Windows":
                 return self._uninstall_windows()
-            elif system == 'Darwin':
+            if system == "Darwin":
                 return self._uninstall_macos()
-            elif system == 'Linux':
+            if system == "Linux":
                 return self._uninstall_linux()
-            else:
-                return False
-        except Exception as e:
-            self.logger.error(f"卸载开机自启动失败: {e}")
             return False
-    
+        except Exception as exc:  # noqa: BLE001 - 同上，边界处可观测降级
+            _LOG.error("autostart_uninstall_failed", system=system, error=repr(exc))
+            return False
+
+    # -- Windows：HKCU Run 注册表 -------------------------------------------------
+
     def _install_windows(self) -> bool:
-        """Windows注册表自启动"""
-        try:
-            import winreg
-            key = winreg.HKEY_CURRENT_USER
-            subkey = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            with winreg.OpenKey(key, subkey, 0, winreg.KEY_SET_VALUE) as regkey:
-                # 使用pythonw.exe避免控制台窗口
-                pythonw = self._python_path.replace('python.exe', 'pythonw.exe')
-                if not pythonw.endswith('pythonw.exe'):
-                    pythonw = self._python_path
-                cmd = f'"{pythonw}" "{self._script_path}" --service'
-                winreg.SetValueEx(regkey, self.service_name, 0, winreg.REG_SZ, cmd)
-            self.logger.info("Windows开机自启动已安装")
-            return True
-        except ImportError:
-            self.logger.error("缺少winreg模块")
-            return False
-        except Exception as e:
-            self.logger.error(f"Windows自启动安装失败: {e}")
-            return False
-    
+        import winreg
+
+        command = self.launch_command()
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as regkey:
+            winreg.SetValueEx(regkey, self.service_name, 0, winreg.REG_SZ, command)
+        _LOG.info("autostart_windows_installed", command=command)
+        return True
+
     def _uninstall_windows(self) -> bool:
-        """卸载Windows自启动"""
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as regkey:
+            try:
+                winreg.DeleteValue(regkey, self.service_name)
+                _LOG.info("autostart_windows_uninstalled")
+            except FileNotFoundError:
+                pass  # 本就未注册：幂等成功
+        return True
+
+    def _query_windows(self) -> bool:
+        import winreg
+
         try:
-            import winreg
-            key = winreg.HKEY_CURRENT_USER
-            subkey = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            with winreg.OpenKey(key, subkey, 0, winreg.KEY_SET_VALUE) as regkey:
-                try:
-                    winreg.DeleteValue(regkey, self.service_name)
-                    self.logger.info("Windows开机自启动已卸载")
-                except FileNotFoundError:
-                    pass
-            return True
-        except Exception as e:
-            self.logger.error(f"Windows自启动卸载失败: {e}")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY) as regkey:
+                value, _type = winreg.QueryValueEx(regkey, self.service_name)
+        except FileNotFoundError:
             return False
-    
+        return bool(value)
+
+    # -- macOS：launchd（v4 行为保留，仅统一 serve 子命令） -----------------------
+
+    def _plist_path(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents" / f"{self.service_name}.plist"
+
     def _install_macos(self) -> bool:
-        """macOS launchd自启动"""
-        try:
-            home = Path.home()
-            launch_dir = home / "Library" / "LaunchAgents"
-            launch_dir.mkdir(parents=True, exist_ok=True)
-            
-            plist_file = launch_dir / f"{self.service_name}.plist"
-            plist_content = f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        plist_file = self._plist_path()
+        plist_file.parent.mkdir(parents=True, exist_ok=True)
+        args = ["serve", "--silent"]
+        if self._frozen:
+            program_args = [self._exe_path, *args]
+        else:
+            program_args = [self._python_path, "-m", "rdc", *args]
+        args_xml = "\n".join(f"        <string>{a}</string>" for a in program_args)
+        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>{self.service_name}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{self._python_path}</string>
-        <string>{self._script_path}</string>
-        <string>--service</string>
+{args_xml}
     </array>
     <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
     <true/>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
-</plist>'''
-            
-            with open(plist_file, 'w') as f:
-                f.write(plist_content)
-            
-            # 加载服务
-            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell），无外部输入注入面
-            subprocess.run(['launchctl', 'load', str(plist_file)], check=True)  # nosec B603 B607 -- argv 固定列表；plist_file 为应用自写路径
-            self.logger.info("macOS开机自启动已安装")
-            return True
-        except Exception as e:
-            self.logger.error(f"macOS自启动安装失败: {e}")
-            return False
-    
+</plist>"""
+        plist_file.write_text(plist_content, encoding="utf-8")
+        import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell），无注入面
+
+        subprocess.run(  # nosec B603 B607 -- argv 固定列表；路径为应用自写
+            ["launchctl", "load", str(plist_file)], check=True
+        )
+        _LOG.info("autostart_macos_installed")
+        return True
+
     def _uninstall_macos(self) -> bool:
-        """卸载macOS自启动"""
-        try:
-            plist_file = Path.home() / "Library" / "LaunchAgents" / f"{self.service_name}.plist"
-            if plist_file.exists():
-                import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
-                subprocess.run(['launchctl', 'unload', str(plist_file)], check=True)  # nosec B603 B607 -- argv 固定列表；路径为应用自写
-                plist_file.unlink()
-                self.logger.info("macOS开机自启动已卸载")
-            return True
-        except Exception as e:
-            self.logger.error(f"macOS自启动卸载失败: {e}")
-            return False
-    
+        plist_file = self._plist_path()
+        if plist_file.exists():
+            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
+
+            subprocess.run(  # nosec B603 B607 -- argv 固定；路径为应用自写
+                ["launchctl", "unload", str(plist_file)], check=True
+            )
+            plist_file.unlink()
+            _LOG.info("autostart_macos_uninstalled")
+        return True
+
+    # -- Linux：systemd user（v4 行为保留，仅统一 serve 子命令） ------------------
+
+    def _unit_path(self) -> Path:
+        return Path.home() / ".config" / "systemd" / "user" / f"{self.service_name}.service"
+
     def _install_linux(self) -> bool:
-        """Linux systemd自启动"""
-        try:
-            user_dir = Path.home() / ".config" / "systemd" / "user"
-            user_dir.mkdir(parents=True, exist_ok=True)
-            
-            service_file = user_dir / f"{self.service_name}.service"
-            service_content = f'''[Unit]
+        user_dir = self._unit_path().parent
+        user_dir.mkdir(parents=True, exist_ok=True)
+        service_file = user_dir / f"{self.service_name}.service"
+        if self._frozen:
+            exec_start = f"{self._exe_path} serve --silent"
+        else:
+            exec_start = f"{self._python_path} -m rdc serve --silent"
+        service_content = f"""[Unit]
 Description={self.service_name}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart={self._python_path} {self._script_path} --service
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target'''
-            
-            with open(service_file, 'w') as f:
-                f.write(service_content)
-            
-            # 启用服务
-            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
-            subprocess.run(['systemctl', '--user', 'enable', str(service_file.name)], check=True)  # nosec B603 B607 -- argv 固定；service_file.name 应用自写
-            subprocess.run(['systemctl', '--user', 'start', str(service_file.name)], check=True)  # nosec B603 B607 -- 同上
-            self.logger.info("Linux开机自启动已安装")
-            return True
-        except Exception as e:
-            self.logger.error(f"Linux自启动安装失败: {e}")
-            return False
-    
+WantedBy=default.target"""
+        service_file.write_text(service_content, encoding="utf-8")
+        import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell），无注入面
+
+        subprocess.run(  # nosec B603 B607 -- argv 固定列表；unit 名应用自写
+            ["systemctl", "--user", "daemon-reload"], check=True
+        )
+        subprocess.run(  # nosec B603 B607 -- 同上
+            ["systemctl", "--user", "enable", "--now", service_file.name], check=True
+        )
+        _LOG.info("autostart_linux_installed")
+        return True
+
     def _uninstall_linux(self) -> bool:
-        """卸载Linux自启动"""
-        try:
-            service_file = Path.home() / ".config" / "systemd" / "user" / f"{self.service_name}.service"
-            if service_file.exists():
-                import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
-                subprocess.run(['systemctl', '--user', 'stop', service_file.name], check=True)  # nosec B603 B607 -- argv 固定；service_file.name 应用自写
-                subprocess.run(['systemctl', '--user', 'disable', service_file.name], check=True)  # nosec B603 B607 -- 同上
-                service_file.unlink()
-                self.logger.info("Linux开机自启动已卸载")
-            return True
-        except Exception as e:
-            self.logger.error(f"Linux自启动卸载失败: {e}")
-            return False
+        service_file = self._unit_path()
+        if service_file.exists():
+            import subprocess  # nosec B404 -- 固定 argv 系统管理命令（不经 shell）
+
+            # 字面 argv 逐条调用（与 _install_linux 同风格）：循环变量会让
+            # bandit 看不到 argv 字面量，nosec 标注反而虚标（B607 不触发）。
+            subprocess.run(  # nosec B603 B607 -- argv 固定列表；unit 名应用自写
+                ["systemctl", "--user", "disable", "--now", service_file.name], check=True
+            )
+            subprocess.run(  # nosec B603 B607 -- argv 固定列表
+                ["systemctl", "--user", "daemon-reload"], check=True
+            )
+            service_file.unlink()
+            _LOG.info("autostart_linux_uninstalled")
+        return True
+
+
+# v4 兼容面：模块级便捷函数（托盘/Launcher 用）
+_DEFAULT = AutostartManager()
+
+
+def is_autostart_enabled() -> bool:
+    """默认服务名的自启注册状态。"""
+    return _DEFAULT.is_enabled()
+
+
+def set_autostart(enable: bool) -> bool:
+    """开启/关闭开机自启（返回最终成功与否；失败已记日志，调用方须提示用户）。"""
+    return _DEFAULT.install() if enable else _DEFAULT.uninstall()

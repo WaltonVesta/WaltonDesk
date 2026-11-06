@@ -8,6 +8,7 @@ v4 用 pystray（本机实测未安装）+ PIL 画图标；v5 用 Qt 原生托�
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu
 
 from rdc.host.netinfo import get_local_ip_v4, get_local_ip_v6
+from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.theme.tokens import TOKENS
 
@@ -23,6 +25,8 @@ if TYPE_CHECKING:
     pass
 
 __all__ = ["TrayController", "TrayState"]
+
+_LOG = get_logger("ui.tray")
 
 
 class TrayState:
@@ -65,27 +69,51 @@ class TrayController(QObject):
         pauseToggled(): 用户点击"暂停/恢复"。
         restartRequested(): 用户点击"重启服务"。
         quitRequested(): 用户点击"退出"。
+        autostartToggled(bool, bool): 开机自启注册结果 (目标态, 是否成功)；
+            失败时菜单勾选已回滚（Feature 17）。
+        changePasswordRequested(): 用户点击"修改密码"（Feature 18）。
+        noticeSuppressed(): 用户在初始口令气泡勾选"不再提示"（Feature 18）。
 
     Args:
         parent: 所有者（一般 = QApplication）。
         on_status_show: 点击"状态"项（弹出被控端状态窗/主窗）的回调。
+        autostart_get: 读取开机自启状态（默认
+            :func:`rdc.host.autostart.is_autostart_enabled`；测试注入替身）。
+        autostart_set: 开关开机自启（默认 :func:`rdc.host.autostart.set_autostart`）。
     """
 
     pauseToggled = Signal()
     restartRequested = Signal()
     quitRequested = Signal()
+    #: 开机自启注册结果：``(enabled, ok)``（ok=False 表示注册/注销失败，
+    #: 勾选态已回滚；Feature 17）。
+    autostartToggled = Signal(bool, bool)
+    changePasswordRequested = Signal()
+    noticeSuppressed = Signal()
 
     def __init__(
         self,
         *,
         on_status_show: Callable[[], None] | None = None,
         allow_restart: bool = True,
+        autostart_get: Callable[[], bool] | None = None,
+        autostart_set: Callable[[bool], bool] | None = None,
         parent: QObject | None = None,
     ) -> None:
         ensure_gui_thread("TrayController")
         super().__init__(parent)
         from PySide6.QtWidgets import QSystemTrayIcon  # 延迟：构造需要 QApplication
 
+        if autostart_get is None:
+            from rdc.host.autostart import is_autostart_enabled
+
+            autostart_get = is_autostart_enabled
+        if autostart_set is None:
+            from rdc.host.autostart import set_autostart
+
+            autostart_set = set_autostart
+        self._autostart_get = autostart_get
+        self._autostart_set = autostart_set
         self._state = TrayState.RUNNING
         self._client_count = 0
         self._on_status_show = on_status_show
@@ -129,6 +157,28 @@ class TrayController(QObject):
         self._client_count = count
         self._refresh_tooltip()
 
+    def notify_initial_password(self, text: str, *, timeout_ms: int = 60_000) -> bool:
+        """托盘气泡展示初始口令提示（Feature 18）。
+
+        Returns:
+            气泡实际发出为 ``True``；平台不支持气泡（无系统托盘）返回
+            ``False``，调用方须另寻途径提示（Launcher/日志），不得静默。
+        """
+        ensure_gui_thread("TrayController.notify_initial_password")
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return False
+        # 气泡本体放不进"不再提示"勾选框（QSystemTrayIcon 限制）：气泡负责
+        # 显眼展示明文，点击气泡后由 on_message_clicked 路径处理抑制。
+        self._icon.showMessage(
+            "远程桌面控制 · 初始密码", text, build_tray_icon(TrayState.RUNNING), timeout_ms
+        )
+        with contextlib.suppress(RuntimeError, TypeError):
+            self._icon.messageClicked.disconnect()  # 从未连接过：Qt 无接收者时抛错
+        self._icon.messageClicked.connect(self.noticeSuppressed.emit)
+        return True
+
     # -- 内部 ---------------------------------------------------------------------
 
     def _build_menu(self) -> QMenu:
@@ -154,6 +204,19 @@ class TrayController(QObject):
             act_restart = QAction("🔄 重启服务", menu)
             act_restart.triggered.connect(self.restartRequested.emit)
             menu.addAction(act_restart)
+        # Feature 17：开机自启勾选（checkable，反映注册表现状）
+        self._autostart_action = QAction("🚀 开机自启（静默被控端）", menu)
+        self._autostart_action.setCheckable(True)
+        try:
+            self._autostart_action.setChecked(bool(self._autostart_get()))
+        except Exception:  # noqa: BLE001 - 读取失败按未勾选呈现，不阻断菜单
+            self._autostart_action.setChecked(False)
+        self._autostart_action.toggled.connect(self._on_autostart_toggled)
+        menu.addAction(self._autostart_action)
+        # Feature 18：修改密码入口
+        act_pwd = QAction("🔑 修改密码…", menu)
+        act_pwd.triggered.connect(self.changePasswordRequested.emit)
+        menu.addAction(act_pwd)
         menu.addSeparator()
         act_quit = QAction("🚪 退出", menu)
         act_quit.triggered.connect(self.quitRequested.emit)
@@ -188,6 +251,30 @@ class TrayController(QObject):
 
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._show_status()
+
+    def _on_autostart_toggled(self, enable: bool) -> None:
+        """开机自启勾选即时注册/注销；失败回滚勾选并上报（不静默，Feature 17）。"""
+        try:
+            ok = bool(self._autostart_set(enable))
+        except Exception as exc:  # noqa: BLE001 - 注册表写失败：回滚后上报由调用方提示
+            _LOG.error("tray_autostart_toggle_failed", enable=enable, error=repr(exc))
+            ok = False
+        if not ok:
+            self._autostart_action.blockSignals(True)
+            self._autostart_action.setChecked(not enable)
+            self._autostart_action.blockSignals(False)
+        self.autostartToggled.emit(enable, ok)
+
+    def sync_autostart(self) -> bool:
+        """重新读取注册表刷新勾选态（Launcher 改过自启后回托盘可调用）。"""
+        try:
+            enabled = bool(self._autostart_get())
+        except Exception:  # noqa: BLE001 - 读取失败保持现状，不阻断
+            return self._autostart_action.isChecked()
+        self._autostart_action.blockSignals(True)
+        self._autostart_action.setChecked(enabled)
+        self._autostart_action.blockSignals(False)
+        return enabled
 
     def _refresh_tooltip(self) -> None:
         up = getattr(self, "_uptime_s", 0.0)

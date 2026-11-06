@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from rdc import __version__
-from rdc.config.settings import Settings, load_settings, save_settings
+from rdc.config.settings import Settings, load_settings, save_settings, set_current
 from rdc.console_safety import stdin_is_absent, stdin_is_tty
 from rdc.logging import get_logger
 from rdc.security.password_policy import check_password, policy_error_text
@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", dest="bind_host", default=None, help="监听地址（覆盖配置，如 127.0.0.1）")
     serve.add_argument("--config", default=None, help="配置文件路径（缺省用标准位置；便携/测试模式）")
     serve.add_argument("--tray", action="store_true", help="启用系统托盘（走 GUI 事件循环装配）")
+    serve.add_argument(
+        "--silent",
+        action="store_true",
+        help="静默模式（开机自启用）：不打印控制台横幅，直接进被控端、不弹 Launcher",
+    )
 
     control = sub.add_parser("control", help="主控端 CLI 冒烟（无 GUI：认证+收帧统计）")
     control.add_argument("host", help="被控端地址")
@@ -79,18 +84,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_serve(args: argparse.Namespace) -> int:
     """启动被控端：默认纯 asyncio 事件循环；``--tray`` 走 GUI 循环（QSystemTrayIcon）。"""
-    settings = load_settings(Path(args.config)) if args.config else load_settings()
+    config_path = Path(args.config) if args.config else None
+    settings = load_settings(config_path) if config_path else load_settings()
     if args.bind_host:
         settings.bind_host = args.bind_host
+    # Feature 18：首次运行（无口令）自动生成随机强口令并落盘，供启动回显；
+    # Feature 17：--silent（开机自启形态）不打印横幅、不进 GUI，纯后台服务。
+    from rdc.server.initial_password import ensure_host_password
+
+    silent = bool(getattr(args, "silent", False))
+    ensure_host_password(settings)
+    # 落盘写回**加载来源同一文件**（--config 便携/测试模式若写默认位置，
+    # 生成的口令下次启动即丢失——用户拿到的初始密码永远连不上）。
+    save_settings(settings, config_path)
+    set_current(settings)
     if args.tray:
         from rdc.ui.session import host_session
 
         return _run_gui_with(host_session, settings)
-    return _run_serve_headless(settings)
+    return _run_serve_headless(settings, silent=silent)
 
 
-def _run_serve_headless(settings: Settings) -> int:
-    """无 GUI 被控端：asyncio 跑至 Ctrl+C。"""
+def _run_serve_headless(settings: Settings, *, silent: bool = False) -> int:
+    """无 GUI 被控端：asyncio 跑至 Ctrl+C。``silent``（开机自启）不打印横幅。"""
     import asyncio
 
     from rdc.server.service import HostService
@@ -110,7 +126,8 @@ def _run_serve_headless(settings: Settings) -> int:
                 continue
             with contextlib.suppress(NotImplementedError):  # Windows Proactor 部分信号不支持
                 loop.add_signal_handler(sig, stop.set)
-        _print_host_banner(service, settings)
+        if not silent:
+            _print_host_banner(service, settings)
         try:
             await stop.wait()
         finally:
@@ -151,13 +168,30 @@ def _run_gui_with(
 
 
 def _print_host_banner(service: object, settings: Settings) -> None:
-    """控制台就绪提示（只含地址/端口/开关，无敏感值）。"""
+    """控制台就绪提示（地址/端口/开关无敏感值；Feature 18 追加初始口令显眼回显）。"""
     print(
         f"被控端已启动: 监听 {settings.bind_host} "
         f"控制端口={settings.control_port} 画面端口={settings.port} "
         f"认证={'开' if settings.enable_auth and settings.password_hash else '关（任意口令）'} "
         f"(Ctrl+C 退出)"
     )
+    notice = _initial_notice_text_safe(settings)
+    if notice:
+        # 显眼回显：空行 + 分隔线包裹，控制台里一眼可见（Feature 18 要求）
+        print("=" * 48)
+        print(notice)
+        print("=" * 48)
+
+
+def _initial_notice_text_safe(settings: Settings) -> str:
+    """横幅里的初始口令回显（延迟导入 + 取不到则空串，绝不因回显炸掉启动）。"""
+    try:
+        from rdc.server.initial_password import initial_notice_text
+
+        return initial_notice_text(settings)
+    except Exception as exc:  # noqa: BLE001 - 回显失败不影响被控端已启动的事实
+        _LOG.warning("initial_notice_render_failed", error=repr(exc))
+        return ""
 
 
 def _run_control(args: argparse.Namespace) -> int:
@@ -250,6 +284,7 @@ def _cli_fingerprint(fingerprint: str, host: str) -> bool:
 def _run_set_password(args: argparse.Namespace) -> int:
     """交互式校验强度并写入 bcrypt 哈希；返回进程退出码。"""
     from rdc.secrets.password import hash_password
+    from rdc.server.initial_password import mark_password_user_set
 
     password = args.password
     if password is None:
@@ -272,6 +307,9 @@ def _run_set_password(args: argparse.Namespace) -> int:
     path = Path(args.config) if args.config else None
     settings = load_settings(path) if path else load_settings()
     settings.password_hash = hash_password(password)
+    # Feature 18：用户自行设口令 → 清"自动生成"态并删密钥库里的初始明文，
+    # 否则启动会持续弹"初始密码"提示（与"这是你的密码"的事实矛盾）。
+    mark_password_user_set(settings)
     save_settings(settings, path)
     print("口令已保存（bcrypt rounds=12）。运行中的被控端需重启后生效。")
     _LOG.info("cli_password_set", backend="bcrypt")  # 只记事件，不记任何口令派生值

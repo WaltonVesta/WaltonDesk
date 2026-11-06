@@ -314,7 +314,9 @@ module = [
     #    多显示器坐标由 ScreenRect/GetSystemMetrics 承担，修饰键记账由
     #    后端 _pressed_keys/_pressed_buttons 承担。git 历史可查原实现。）
     # host（阶段 7/10 PlatformAdapter 抽象）
-    "rdc.host.autostart",
+    # ✅(phase-9 走查第十二批 Feature 17): 移除 rdc.host.autostart
+    #   （重写补全类型注解 + 平台分发集中在方法内，全局 strict 实测 0 error；
+    #    power/netinfo 仍留宽松——本轮未触碰，不得虚报兑现）
     "rdc.host.power",
     "rdc.host.netinfo",
     # security（阶段 9 加固）
