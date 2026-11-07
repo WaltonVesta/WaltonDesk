@@ -384,8 +384,12 @@ class HostStatusCode(IntEnum):
     OK = 1
     SCREEN_STALLED = 2
     #: 被控端被托盘暂停（走查第十二批 Bug 12：pause 拆会话**前**主动下行，
-    #: 主控端得到"对方已暂停服务"明确提示，而非无信息的静默 EOF）。
+    #: 主控端得到"对方已暂停服务"明确提示，而非无信息的静默 EOF。
+    #: 走查第十四批 Bug 2 起 pause 改保活软暂停：会话不拆，EOF 覆盖态根除）。
     PAUSED = 3
+    #: 被控端从暂停恢复（走查第十四批 Bug 2：主控端据此恢复"已连接"呈现；
+    #: 与 OK 区分——OK 语义是"画面停滞已恢复"，ACTIVE 是"服务暂停已恢复"）。
+    ACTIVE = 4
 
 
 @dataclass(frozen=True)

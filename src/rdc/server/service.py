@@ -190,6 +190,12 @@ class HostService:
         if self._should_exit:
             _LOG.warning("host_service_exit_requested_skip_start")
             return False
+        if self._paused:
+            # 走查第十四批 Bug 2：兑现 docstring 承诺——软暂停态 start() 即
+            # resume（旧实现靠 teardown 全拆再重建，pause 后 _server 仍在、
+            # listening=False 会穿透到新建分支造成旧会话悬挂在旧实例上）。
+            await self.resume()
+            return self._server is not None and self._server.listening
         if self._server is not None and self._server.listening:
             _LOG.info("host_service_already_running")
             return True
@@ -257,37 +263,45 @@ class HostService:
         return True
 
     async def pause(self) -> None:
-        """暂停：停止监听与推流，进程保留（v4 pause 语义，托盘菜单用）。"""
+        """暂停（走查第十四批 Bug 2 重设计：保活软暂停）。
+
+        旧语义（v4 pause 沿袭）拆监听拆会话——主控端收到链路 EOF 后状态机
+        滑进 DISCONNECTING/RECONNECTING，把先到的"被控端已暂停"提示覆盖成
+        "认证中/已断开"（真机走查现象）。新语义：
+
+        - **已建立会话原样保留**（控制心跳照常往返、画面订阅登记不注销），
+          仅关闭监听拒**新**连接（:meth:`TransportServer.suspend`）；
+        - 管线冻结（``_stop_event.set()`` 停帧不关源）：主控端画面停在最后
+          一帧——"暂停"的直觉语义就是画面定格，恢复即续流；
+        - 下行 ``HOST_STATUS_PAUSED``：主控端据此红字"被控端已暂停"、禁用
+          输入（会话不断，UI 不再被 EOF 覆盖）；
+        - 服务侧门控：暂停期间输入/剪贴板消息丢弃（防"画面定格但键鼠仍在
+          操作"的隔空失控）。
+
+        毫秒级完成（suspend 不等 wait_closed），``_paused`` 入口置位，重入
+        短路。
+        """
         if self._paused or self._server is None:
             return
-        # 走查第十三批 Bug 1：``_paused`` 入口即置位（旧版在 teardown 之后）。
-        # 旧 teardown 被会话空闲窗口拖住（实测 stop()≈10s），期间 is_paused
-        # 恒 False → 托盘"暂停服务"文案不动、再点仍重复下发暂停。前置置位后
-        # 重入即刻短路（幂等），配合 TransportServer.stop 顺序修复，暂停在
-        # 毫秒级完成、文案随即刷新。
         self._paused = True
-        # 走查第十二批 Bug 12：拆会话**前**先给全部控制会话下行 PAUSED 状态帧
-        # （并发、单会话限时 2s 隔离）。旧版 pause 静默关监听，主控端只看到
-        # EOF——画面卡住、无任何"对方已暂停"信息。
-        await self._broadcast_paused_notice()
-        try:
-            await self._teardown_runtime()
-        except Exception:
-            # 收尾异常回滚标志：避免"未暂停却显示已暂停"的反向不一致
-            self._paused = False
-            raise
+        if self._stop_event is not None:
+            self._stop_event.set()
+        await self._server.suspend()
+        await self._broadcast_status(HostStatusCode.PAUSED, "服务已暂停")
         _LOG.info("host_service_paused")
 
-    async def _broadcast_paused_notice(self, timeout_s: float = 2.0) -> None:
-        """向活动控制会话广播暂停状态（单会话失败隔离，不阻断暂停流程）。"""
-        status = HostStatus(code=HostStatusCode.PAUSED, detail="服务已暂停")
+    async def _broadcast_status(
+        self, code: HostStatusCode, detail: str, timeout_s: float = 2.0
+    ) -> None:
+        """向活动控制会话广播一条状态帧（单会话失败隔离，不阻断流程）。"""
+        status = HostStatus(code=code, detail=detail)
 
         async def _one(session: ControlSession) -> None:
             try:
                 await asyncio.wait_for(session.send(status), timeout=timeout_s)
-            except Exception as exc:  # noqa: BLE001 - 通知失败只降级记录（会话本就要被拆除）
+            except Exception as exc:  # noqa: BLE001 - 通知失败只降级记录（会话仍在）
                 _LOG.warning(
-                    "paused_notice_send_failed", client=session.client_ip, error=repr(exc)
+                    "status_notice_send_failed", client=session.client_ip, error=repr(exc)
                 )
 
         sessions = list(self._control_sessions)
@@ -295,11 +309,30 @@ class HostService:
             await asyncio.gather(*(_one(session) for session in sessions))
 
     async def resume(self) -> None:
-        """恢复监听与推流（pause 的逆操作）。"""
+        """恢复（:meth:`pause` 的精确逆操作）：重新监听 + 管线续流 + 下行 ACTIVE。"""
         if not self._paused:
             return
         self._paused = False
-        await self.start()
+        await self._server.resume_listening()  # type: ignore[union-attr]  # 守卫：_paused ⇒ 曾 pause ⇒ _server 存活
+        if self._stop_event is not None:
+            self._stop_event.clear()
+            self._ensure_pipeline_task()
+            if self._cleanup_task is None or self._cleanup_task.done():
+                self._cleanup_task = asyncio.get_running_loop().create_task(
+                    self._ban_cleanup_loop(), name="ban-cleanup"
+                )
+        if self._pipeline is not None:
+            self._pipeline.request_keyframe()  # 暂停期画面或已变（本机自用/其他程序刷新），续流首帧必为 I 帧
+        await self._broadcast_status(HostStatusCode.ACTIVE, "服务已恢复")
+        _LOG.info("host_service_resumed")
+
+    def _ensure_pipeline_task(self) -> None:
+        """管线推流任务缺失时重建（resume / StreamControl.START 共用）。"""
+        if self._pipeline_task is None or self._pipeline_task.done():
+            assert self._pipeline is not None and self._stop_event is not None  # nosec B101 -- 内部不变量：仅 start 后到达
+            self._pipeline_task = asyncio.get_running_loop().create_task(
+                self._pipeline.run(stop=self._stop_event), name="pipeline"
+            )
 
     async def shutdown(self) -> None:
         """关停全部资源并请求进程退出（幂等）。"""
@@ -508,14 +541,29 @@ class HostService:
             self._reset_input()
 
     async def _dispatch_control(self, channel: ControlSession, msg: Message) -> None:
-        """单条控制消息的分派（固定事件循环线程；输入注入为轻量同步 API）。"""
+        """单条控制消息的分派（固定事件循环线程；输入注入为轻量同步 API）。
+
+        走查第十四批 Bug 2（软暂停门控）：会话保活意味着暂停期间输入帧仍会
+        到达——不拦就是"画面定格但键鼠还在操作对方电脑"的隔空失控。暂停期
+        丢弃鼠标/键盘/剪贴板/流控（防 StreamControl.START 重启推流泄露画面），
+        心跳 PONG **必须照常回**（主控端判活依赖；不回会被误断连，正是本批
+        要根除的行为）。
+        """
+        if isinstance(msg, Heartbeat):
+            if msg.kind is HeartbeatKind.PING:
+                await channel.send(Heartbeat(kind=HeartbeatKind.PONG, timestamp=msg.timestamp))
+            return
+        if self._paused:
+            _LOG.debug(
+                "control_message_gated_paused",
+                client=channel.client_ip,
+                type=type(msg).__name__,
+            )
+            return
         if isinstance(msg, MouseEvent):
             self._apply_mouse(msg, channel.client_ip)
         elif isinstance(msg, KeyEvent):
             self._apply_key(msg, channel.client_ip)
-        elif isinstance(msg, Heartbeat):
-            if msg.kind is HeartbeatKind.PING:
-                await channel.send(Heartbeat(kind=HeartbeatKind.PONG, timestamp=msg.timestamp))
         elif isinstance(msg, StreamControl):
             self._apply_stream_control(msg)
         elif isinstance(msg, ClipboardEvent):

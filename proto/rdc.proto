@@ -204,7 +204,10 @@ enum HostStatusCode {
   HOST_STATUS_UNSPECIFIED = 0;
   HOST_STATUS_OK = 1;               // 画面流正常（含从停滞恢复）
   HOST_STATUS_SCREEN_STALLED = 2;   // 连续采集失败（典型：安全桌面/UAC 句柄失效）
-  HOST_STATUS_PAUSED = 3;           // 被控端服务被托盘暂停（走查第十二批 Bug12）
+  HOST_STATUS_PAUSED = 3;           // 被控端服务被托盘暂停（走查第十二批 Bug12；
+                                    // 走查第十四批 Bug2 改保活软暂停：会话不断）
+  HOST_STATUS_ACTIVE = 4;           // 被控端已从暂停恢复（第十四批 Bug2：主控端
+                                    // 据此把"被控端已暂停"切回"已连接"）
 }
 
 message HostStatus {

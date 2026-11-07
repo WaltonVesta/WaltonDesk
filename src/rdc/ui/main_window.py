@@ -133,9 +133,18 @@ class ClientEvents(Protocol):
 
     def clipboard_from_remote(self, text: str) -> None: ...
 
-    def host_status(self, *, stalled: bool, secure_desktop: bool, paused: bool = False) -> None:
+    def host_status(
+        self,
+        *,
+        stalled: bool,
+        secure_desktop: bool,
+        paused: bool = False,
+        active: bool = False,
+    ) -> None:
         """服务端状态下行（走查第六批 P0）：画面停滞/恢复，含安全桌面归因；
-        走查第十二批 Bug 12 扩展 paused=被控端托盘暂停通知。"""
+        走查第十二批 Bug 12 扩展 paused=被控端托盘暂停通知；走查第十四批
+        Bug 2 扩展 active=服务已从暂停恢复（会话保活、无 EOF 覆盖，UI 据此
+        在"被控端已暂停"与"已连接"间切换，严禁进入断连态）。"""
         ...
 
     def clipboard_image_from_remote(self, image: QImage) -> None:
@@ -163,6 +172,10 @@ class MainWindow(QMainWindow):
         self._settings = settings if settings is not None else current_settings()
         self._state = ConnectionState.IDLE
         self._control_on = False
+        #: 走查第十四批 Bug 2：软暂停呈现态。_paused_hint=当前显示"已暂停"
+        #: 提示中；_control_before_pause=暂停前的控制开关（恢复时还原）。
+        self._paused_hint = False
+        self._control_before_pause = False
         self._tasks: set[asyncio.Task[object]] = set()
         #: 封禁倒计时（走查第六批 Bug6）：墙钟 QTimer 每秒刷新状态栏，
         #: 归零自动恢复连接按钮。None = 无倒计时。
@@ -341,28 +354,45 @@ class MainWindow(QMainWindow):
         if self._settings.enable_clipboard:
             self.clipboard.apply_remote(text)
 
-    def host_status(self, *, stalled: bool, secure_desktop: bool, paused: bool = False) -> None:
-        """ClientEvents：服务端状态下行（走查第六批 P0 停滞 + 第十二批 Bug 12 暂停）。
+    def host_status(
+        self,
+        *,
+        stalled: bool,
+        secure_desktop: bool,
+        paused: bool = False,
+        active: bool = False,
+    ) -> None:
+        """ClientEvents：服务端状态下行（第六批 P0 停滞 + 第十二批 Bug 12 暂停）。
 
-        - 暂停：被控端托盘点了"暂停"——明确提示"远端已暂停服务"，并**禁用
-          控制**（远端已不接收输入，不禁用会让用户白点还以为自己在操作对方
-          电脑）；
+        走查第十四批 Bug 2（映射重做）：被控端暂停改**保活软暂停**——会话
+        不拆、无 EOF，本端绝不进入 DISCONNECTED/RECONNECTING/AUTHENTICATING
+        （旧 bug：拆会话的 EOF 把暂停提示覆盖成"认证中/已断开"）。
+
+        - paused → 状态栏红字"被控端已暂停"、禁用控制（记住暂停前开关态）；
+        - active → 还原控制开关、状态栏回"已连接"；
         - 停滞且安全桌面 → "远端处于安全桌面（UAC 确认中），画面暂停"；
-        - 普通停滞 → 采集异常等待自愈；
-        - 恢复 → 状态栏回常态。
+        - 普通停滞 → 采集异常等待自愈；恢复 → 状态栏回常态。
         """
         ensure_gui_thread("MainWindow.host_status")
         if not self._ui_alive():
             return
         if paused:
-            # 走第十二批 Bug 12：先关控制（经主窗口统一入口维护 _control_on
-            # 与控制器开关），再同步按钮勾选态与状态栏提示——按钮不同步的
-            # 话用户看到"禁用控制"仍勾着，与实际禁发输入的事实相矛盾。
+            self._paused_hint = True
+            self._control_before_pause = self._control_on
+            # 先经统一入口关控制（维护 _control_on 与控制器开关一致），再覆
+            # 写状态栏——_on_control_toggled 自带的"控制已禁用"不能盖掉暂停提示。
             self._on_control_toggled(False)
             self.toolbar.set_control_state(False)
-            self.status_bar.set_status(
-                "远端已暂停服务（被控端托盘操作），恢复后重新连接即可继续", "warn"
-            )
+            self.status_bar.set_status("被控端已暂停（连接保持，等待对方恢复）", "error")
+            return
+        if active:
+            if not self._paused_hint:
+                return  # 非暂停期收到 ACTIVE（乱序/重复帧）：不动 UI
+            self._paused_hint = False
+            restore = self._control_before_pause
+            self._on_control_toggled(restore)
+            self.toolbar.set_control_state(restore)
+            self.status_bar.set_status("已连接", "connected")
             return
         if stalled:
             if secure_desktop:

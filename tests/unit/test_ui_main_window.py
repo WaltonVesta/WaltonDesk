@@ -242,6 +242,43 @@ class TestHostStatusHint:
         assert not w.screen_view.input_enabled  # 画面输入随之关闭
         assert not w.toolbar._control_btn.isChecked()  # noqa: SLF001
 
+    def test_paused_stays_connected_no_disconnect(self, qtbot) -> None:
+        """走查第十四批 Bug 2：软暂停期间 UI **绝不**进入断连态。
+
+        病灶：旧实现 pause 拆会话 → state_changed(DISCONNECTED) 覆盖暂停
+        提示（真机见"认证中/已断开"）。保活语义下会话无 EOF；即便迟到的
+        状态帧乱序到达，暂停呈现也只是 CONNECTED 态内的红字提示。
+        """
+        w, c = self._win(qtbot)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        w.host_status(stalled=False, secure_desktop=False, paused=True)
+        assert w.state == ConnectionState.CONNECTED  # 会话保持，不滑断连
+        assert "已暂停" in w.status_bar._status.text()  # noqa: SLF001
+
+    def test_active_restores_connected_and_control(self, qtbot) -> None:
+        """恢复下行 ACTIVE → 状态栏"已连接"、暂停前控制开关还原。"""
+        w, c = self._win(qtbot)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        w.toolbar._control_btn.click()  # noqa: SLF001 暂停前开着控制
+        c.control_flags.clear()
+        w.host_status(stalled=False, secure_desktop=False, paused=True)
+        w.host_status(stalled=False, secure_desktop=False, active=True)
+        text = w.status_bar._status.text()  # noqa: SLF001
+        assert "已连接" in text, text
+        # 暂停关控制 + 恢复还原 = 两次下发，最终 True（暂停前态）
+        assert c.control_flags == [False, True], c.control_flags
+        assert w.toolbar._control_btn.isChecked()  # noqa: SLF001
+        assert w.screen_view.input_enabled
+
+    def test_active_without_pause_is_noop(self, qtbot) -> None:
+        """乱序/重复 ACTIVE（非暂停期到达）不动 UI，防误翻状态栏。"""
+        w, c = self._win(qtbot)
+        w._set_state(ConnectionState.CONNECTED)  # noqa: SLF001
+        c.control_flags.clear()
+        w.host_status(stalled=False, secure_desktop=False, active=True)
+        assert c.control_flags == []
+        assert not w._paused_hint  # noqa: SLF001
+
 
 class TestDeletedUiCallbacks:
     """走查第六批 Bug5：主窗销毁后 controller 迟到回调不得触达已删 C++ 对象。

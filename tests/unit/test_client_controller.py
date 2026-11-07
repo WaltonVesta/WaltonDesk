@@ -582,7 +582,9 @@ class TestInboundDispatch:
         ctl._on_control_message(  # noqa: SLF001
             HostStatus(code=HostStatusCode.SCREEN_STALLED, secure_desktop=True, detail="BitBlt")
         )
-        assert got == [{"stalled": True, "secure_desktop": True, "paused": False}]
+        assert got == [
+            {"stalled": True, "secure_desktop": True, "paused": False, "active": False}
+        ]
 
     async def test_host_status_ok_dispatch_recovery(self) -> None:
         ctl, _ = make_ctrl()
@@ -592,7 +594,9 @@ class TestInboundDispatch:
         )
         await connect_ok(ctl)
         ctl._on_control_message(HostStatus(code=HostStatusCode.OK))  # noqa: SLF001
-        assert got == [{"stalled": False, "secure_desktop": False, "paused": False}]
+        assert got == [
+            {"stalled": False, "secure_desktop": False, "paused": False, "active": False}
+        ]
 
     async def test_host_status_paused_dispatched(self) -> None:
         """走查第十二批 Bug 12：被控端托盘暂停 → PAUSED 下行原样派发。
@@ -606,7 +610,22 @@ class TestInboundDispatch:
         ctl._on_control_message(  # noqa: SLF001
             HostStatus(code=HostStatusCode.PAUSED, detail="服务已暂停")
         )
-        assert got == [{"stalled": False, "secure_desktop": False, "paused": True}]
+        assert got == [
+            {"stalled": False, "secure_desktop": False, "paused": True, "active": False}
+        ]
+
+    async def test_host_status_active_dispatched(self) -> None:
+        """走查第十四批 Bug 2：恢复下行 ACTIVE 原样派发（UI 回"已连接"）。"""
+        ctl, _ = make_ctrl()
+        got: list[dict[str, object]] = []
+        ctl.set_events(SimpleNamespace(host_status=lambda **kw: got.append(kw)))
+        await connect_ok(ctl)
+        ctl._on_control_message(  # noqa: SLF001
+            HostStatus(code=HostStatusCode.ACTIVE, detail="服务已恢复")
+        )
+        assert got == [
+            {"stalled": False, "secure_desktop": False, "paused": False, "active": True}
+        ]
 
     async def test_send_clipboard_outbound(self) -> None:
         ctl, _ = make_ctrl()

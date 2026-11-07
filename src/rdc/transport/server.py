@@ -279,6 +279,62 @@ class TransportServer:
                 self._log.debug("server_wait_closed_failed", error=repr(exc))
         self._servers = []
 
+    async def suspend(self) -> None:
+        """软暂停：关闭监听套接字拒新连，**已建立会话与任务全部保留**。
+
+        走查第十四批 Bug 2（暂停语义重设计）：旧 pause 走 :meth:`stop` 拆除
+        一切，主控端在 ``next_message`` 里收到 EOF → 状态机滑进
+        DISCONNECTED/RECONNECTING（"认证中/已断开"覆盖"被控端已暂停"提示，
+        真机现象）。suspend 只 ``close()`` 监听 fd（不等 wait_closed、不关
+        会话）：已连客户端链路原样存活，心跳照常往返，画面由服务层冻结管线
+        呈现"最后一帧 + 已暂停"，恢复经 :meth:`resume_listening` 重新开闸。
+
+        幂等：无监听时 no-op。
+        """
+        if not self._servers:
+            return
+        for server in self._servers:
+            server.close()
+        # 双栈路径的裸监听 socket 由 start_server 持有，close() 后其 fd 即释
+        # 放；此处**不** await wait_closed——3.12+ 起它会等在途 handler（含空
+        # 闲阻塞中的会话协程）跑完，正是要避开的 10s 拖点（第十三批 Bug 1）。
+        self._servers = []
+        self._log.info("transport_suspended_sessions_kept", kept=len(self._sessions))
+
+    async def resume_listening(self) -> None:
+        """重新开闸监听（:meth:`suspend` 的逆；已监听则 no-op）。
+
+        与 :meth:`start` 同构复用双栈/常规路径与回调装配，但绝不重建
+        会话/任务/信号量——暂停期间它们从未离开。
+        """
+        if self._servers:
+            return
+        dual = self._dualstack_sockets()
+        if dual:
+            ctrl = await asyncio.start_server(
+                self._dispatch(self._handle_control), sock=dual[0], ssl=self._ssl_ctx
+            )
+            scr = await asyncio.start_server(
+                self._dispatch(self._handle_screen), sock=dual[1], ssl=self._ssl_ctx
+            )
+        else:
+            ctrl = await asyncio.start_server(
+                self._dispatch(self._handle_control),
+                self._host,
+                self._control_port,
+                ssl=self._ssl_ctx,
+            )
+            scr = await asyncio.start_server(
+                self._dispatch(self._handle_screen),
+                self._host,
+                self._screen_port,
+                ssl=self._ssl_ctx,
+            )
+        self._servers = [ctrl, scr]
+        self._log.info(
+            "transport_resumed", control_port=self._control_port, screen_port=self._screen_port
+        )
+
     @property
     def listening(self) -> bool:
         """是否处于监听状态。"""

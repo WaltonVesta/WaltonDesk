@@ -454,11 +454,17 @@ class ClientController:
             self._dispatch_event("clipboard_from_remote", msg.text)
             return
         if isinstance(msg, HostStatus):
-            # 走查第十二批 Bug 12：被控端托盘暂停 → 服务端拆会话**前**下行
-            # PAUSED，本端在 EOF/重连风暴之前先拿到"对方已暂停"事实。
+            # 走查第十二批 Bug 12：被控端托盘暂停 → 下行 PAUSED。
+            # 走查第十四批 Bug 2：pause 改保活软暂停（会话不拆，无 EOF 风暴），
+            # 且恢复下行 ACTIVE——UI 据此在"被控端已暂停"与"已连接"间切换，
+            # 全程不进入 DISCONNECTED/AUTHENTICATING（旧 bug：拆会话的 EOF
+            # 把暂停提示覆盖成"认证中/已断开"）。
             paused = msg.code is HostStatusCode.PAUSED
+            active = msg.code is HostStatusCode.ACTIVE
             if paused:
                 _LOG.info("host_status_paused", detail=msg.detail)
+            elif active:
+                _LOG.info("host_status_active", detail=msg.detail)
             elif msg.code is HostStatusCode.SCREEN_STALLED:
                 _LOG.warning(
                     "host_status_stalled",
@@ -472,6 +478,7 @@ class ClientController:
                 stalled=msg.code is HostStatusCode.SCREEN_STALLED,
                 secure_desktop=msg.secure_desktop,
                 paused=paused,
+                active=active,
             )
             return
         _LOG.debug("control_unexpected_inbound", type=type(msg).__name__)

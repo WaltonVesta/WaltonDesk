@@ -625,3 +625,87 @@ class TestPauseResumeScreenFlow:
             await ch.close()
         finally:
             await svc.shutdown()
+
+
+class TestSoftPauseKeepsSessions:
+    """走查第十四批 Bug 2：暂停改保活软暂停的决定性哨兵。
+
+    真机病灶：旧 pause 拆监听拆会话 → 主控端 ``next_message`` 收 EOF →
+    状态机滑 DISCONNECTED/RECONNECTING，先到的 PAUSED 提示被"认证中/
+    已断开"覆盖。保活语义下会话必须**全程存活**（无 EOF）、新连接被拒、
+    输入被门控、心跳仍往返、恢复下行 ACTIVE。
+    """
+
+    async def test_pause_keeps_live_session_no_eof(self, tmp_app_dir: Path) -> None:
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            ch = _control(s)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+            await svc.pause()
+            # 会话仍挂在服务端（保活）——旧实现这里已被 teardown 清空
+            assert len(svc._control_sessions) == 1  # noqa: SLF001
+            # 客户端侧：下一帧是 PAUSED 状态帧，而不是 None(EOF)
+            msg = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(msg, HostStatus) and msg.code is HostStatusCode.PAUSED
+            # 心跳照常往返（判活不被误断——旧实现 EOF 后只能走重连）
+            await ch.send(Heartbeat(kind=HeartbeatKind.PING, timestamp=1.0))
+            pong = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(pong, Heartbeat) and pong.kind is HeartbeatKind.PONG
+            await svc.resume()
+            act = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(act, HostStatus) and act.code is HostStatusCode.ACTIVE
+            # 恢复后旧会话依旧可用
+            await ch.send(Heartbeat(kind=HeartbeatKind.PING, timestamp=2.0))
+            pong2 = await asyncio.wait_for(ch.next_message(), timeout=5)
+            assert isinstance(pong2, Heartbeat)
+            await ch.close()
+        finally:
+            await svc.shutdown()
+
+    async def test_pause_rejects_new_connections(self, tmp_app_dir: Path) -> None:
+        s = make_settings(tmp_app_dir)
+        svc, _ = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            await svc.pause()
+            assert not svc.is_running and svc.is_paused  # 监听已关（语义延续）
+            ch = _control(s)
+            with pytest.raises((OSError, asyncio.TimeoutError)):
+                await asyncio.wait_for(ch.connect(), timeout=3)
+            await svc.resume()
+            ch2 = _control(s)
+            await asyncio.wait_for(ch2.connect(), timeout=5)
+            await ch2.close()
+        finally:
+            await svc.shutdown()
+
+    async def test_paused_input_gated_resumes_after(self, tmp_app_dir: Path) -> None:
+        s = make_settings(tmp_app_dir)
+        svc, backend = make_service(tmp_app_dir, s)
+        try:
+            await svc.start()
+            ch = _control(s)
+            await ch.connect()
+            await _wait_until(lambda: len(svc._control_sessions) == 1)  # noqa: SLF001
+            await svc.pause()
+            await asyncio.wait_for(ch.next_message(), timeout=5)  # 消费 PAUSED 帧
+            # 暂停期间输入帧到达但不执行（隔空失控防线）
+            await ch.send(
+                MouseEvent(x=10, y=10, action=MouseAction.CLICK, button=MouseButton.LEFT)
+            )
+            await asyncio.sleep(0.1)
+            assert backend.calls == [], backend.calls
+            # 恢复后输入重新放行
+            await svc.resume()
+            await asyncio.wait_for(ch.next_message(), timeout=5)  # ACTIVE 帧
+            await ch.send(
+                MouseEvent(x=20, y=20, action=MouseAction.CLICK, button=MouseButton.LEFT)
+            )
+            await _wait_until(lambda: len(backend.calls) >= 2)
+            assert any(c[0] == "click" for c in backend.calls)
+            await ch.close()
+        finally:
+            await svc.shutdown()
