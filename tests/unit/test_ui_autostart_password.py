@@ -126,6 +126,76 @@ class TestTrayMenu:
 
 
 # ---------------------------------------------------------------------------
+# 本机地址实时展示（走查第十四批 Bug 1：隐私临时地址轮换后不得给旧 IP）
+# ---------------------------------------------------------------------------
+
+
+class TestTrayRealtimeIp:
+    def _tray(self, monkeypatch: pytest.MonkeyPatch, state: dict):
+        import rdc.ui.tray as t
+
+        monkeypatch.setattr(t, "get_preferred_ipv4", lambda: state["v4"])
+        monkeypatch.setattr(t, "get_local_ip_v6", lambda: state["v6"])
+        monkeypatch.setattr(
+            t,
+            "get_display_ips",
+            lambda: [f"IPv4: {state['v4']}"]
+            + ([f"IPv6: {state['v6']}"] if state["v6"] else []),
+        )
+        return TrayController(autostart_get=lambda: False, autostart_set=lambda e: True)
+
+    def test_menu_text_refreshes_on_every_popup(self, qtbot, monkeypatch) -> None:
+        """同一 QAction 每次弹出重写文案——旧实现构建期取一次值，永不更新。"""
+        state = {"v4": "192.168.1.10", "v6": "2409:8a55::1"}
+        tray = self._tray(monkeypatch, state)
+        tray._refresh_ip_actions()  # noqa: SLF001 - aboutToShow 槽
+        act = _find_action(tray, "复制IPv6")
+        assert act is not None and act.text().endswith("2409:8a55::1")
+        state["v6"] = "2409:8a55::9"  # 模拟隐私临时地址轮换
+        tray._menu.aboutToShow.emit()  # noqa: SLF001 - 真信号驱动，验证接线
+        assert act.text().endswith("2409:8a55::9")
+
+    def test_copy_takes_value_at_trigger_time(self, qtbot, monkeypatch) -> None:
+        """复制动作取**点击时刻**的值：弹出→点击之间地址再变也复制新的。
+
+        旧实现 ``lambda: self._copy(v6)`` 闭包捕获构建期局部名，必复制旧地址。
+        """
+        state = {"v4": "192.168.1.10", "v6": "2409::1"}
+        tray = self._tray(monkeypatch, state)
+        copied: list[str] = []
+        monkeypatch.setattr(
+            TrayController,
+            "_copy",
+            staticmethod(lambda text, proto="": copied.append(text)),
+        )
+        act = _find_action(tray, "复制IPv6")
+        assert act is not None
+        state["v6"] = "2409::2"
+        act.trigger()
+        assert copied == ["2409::2"]
+
+    def test_v6_row_hidden_when_unavailable(self, qtbot, monkeypatch) -> None:
+        state = {"v4": "192.168.1.10", "v6": None}
+        tray = self._tray(monkeypatch, state)
+        tray._refresh_ip_actions()  # noqa: SLF001
+        act = _find_action(tray, "复制IPv6")
+        assert act is not None and not act.isVisible()
+
+    def test_tooltip_labels_protocols(self, qtbot, monkeypatch) -> None:
+        """tooltip 实时含 "IPv4: ... / IPv6: ..." 协议标明（多地址并列）。"""
+        tips: list[str] = []
+        state = {"v4": "10.0.0.5", "v6": "2409:8a55::7"}
+        tray = self._tray(monkeypatch, state)
+        monkeypatch.setattr(
+            tray._icon,  # noqa: SLF001
+            "setToolTip",
+            lambda t: tips.append(t),
+        )
+        tray._refresh_tooltip()  # noqa: SLF001
+        assert tips and "IPv4: 10.0.0.5" in tips[-1] and "IPv6: 2409:8a55::7" in tips[-1]
+
+
+# ---------------------------------------------------------------------------
 # 改密对话框（Feature 18）
 # ---------------------------------------------------------------------------
 

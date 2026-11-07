@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu
 
-from rdc.host.netinfo import get_local_ip_v4, get_local_ip_v6
+from rdc.host.netinfo import get_display_ips, get_local_ip_v6, get_preferred_ipv4
 from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.theme.tokens import TOKENS
@@ -201,15 +201,21 @@ class TrayController(QObject):
         self._status_action = QAction(f"📡 状态: {self._state_label()}", menu)
         self._status_action.triggered.connect(self._show_status)
         menu.addAction(self._status_action)
-        ipv4 = get_local_ip_v4()
-        act4 = QAction(f"📋 复制IPv4: {ipv4}", menu)
-        act4.triggered.connect(lambda: self._copy(ipv4))
-        menu.addAction(act4)
-        v6 = get_local_ip_v6()
-        if v6:
-            act6 = QAction(f"📋 复制IPv6: {v6}", menu)
-            act6.triggered.connect(lambda: self._copy(v6))
-            menu.addAction(act6)
+        # 走查第十四批 Bug 1：菜单文案与复制值都在**触发时刻**实时取——
+        # 旧实现把启动时取到的 IP 闭包进 lambda，Windows IPv6 隐私临时地址
+        # 周期性轮换 / 切网后用户复制的必是旧地址（连不上）。menu.aboutToShow
+        # 每次弹出重写文案；复制动作再取一次当前值（弹出→点击间也可能变）。
+        self._ip_action_v4 = QAction("📋 复制IPv4: …", menu)
+        self._ip_action_v4.triggered.connect(
+            lambda: self._copy(get_preferred_ipv4(), "IPv4")
+        )
+        menu.addAction(self._ip_action_v4)
+        self._ip_action_v6 = QAction("📋 复制IPv6: …", menu)
+        self._ip_action_v6.triggered.connect(
+            lambda: self._copy(get_local_ip_v6() or "", "IPv6")
+        )
+        menu.addAction(self._ip_action_v6)
+        menu.aboutToShow.connect(self._refresh_ip_actions)
         menu.addSeparator()
         pause_label = "⏸ 暂停服务" if self._state == TrayState.RUNNING else "▶ 恢复服务"
         act_pause = QAction(pause_label, menu)
@@ -251,15 +257,39 @@ class TrayController(QObject):
             TrayState.STOPPED: "已停止",
         }.get(self._state, self._state)
 
+    def _refresh_ip_actions(self) -> None:
+        """菜单弹出前刷新 IP 项：实时取数、标明协议；无 v6 时隐藏该行。
+
+        走查第十四批 Bug 1 展示面：文案绝不缓存——每次 aboutToShow 都重新
+        调用底层 API（隐私临时地址轮换/切网后，上一行字就是旧地址）。
+        """
+        try:
+            v4 = get_preferred_ipv4()
+        except Exception as exc:  # noqa: BLE001 - 取数失败降级占位，菜单仍可用
+            _LOG.warning("tray_ip_probe_failed", proto="IPv4", error=repr(exc))
+            v4 = "?"
+        self._ip_action_v4.setText(f"📋 复制IPv4: {v4}")
+        try:
+            v6 = get_local_ip_v6()
+        except Exception as exc:  # noqa: BLE001 - 同上
+            _LOG.warning("tray_ip_probe_failed", proto="IPv6", error=repr(exc))
+            v6 = None
+        self._ip_action_v6.setVisible(bool(v6))
+        if v6:
+            self._ip_action_v6.setText(f"📋 复制IPv6: {v6}")
+
     def _show_status(self) -> None:
         if self._on_status_show is not None:
             self._on_status_show()
 
     @staticmethod
-    def _copy(text: str) -> None:
+    def _copy(text: str, proto: str = "") -> None:
+        """复制当前时刻的 IP 值（第十四批 Bug 1：值由调用点实时取参传入）。"""
         app = QApplication.instance()
-        if isinstance(app, QApplication) and text:
+        if isinstance(app, QApplication) and text and text != "?":
             app.clipboard().setText(text)
+        elif proto:
+            _LOG.info("tray_copy_unavailable", proto=proto)
 
     def _on_activated(self, reason: object) -> None:  # noqa: ANN401 - Qt 枚举跨版本
         from PySide6.QtWidgets import QSystemTrayIcon
@@ -294,7 +324,16 @@ class TrayController(QObject):
     def _refresh_tooltip(self) -> None:
         up = getattr(self, "_uptime_s", 0.0)
         h, m, s = int(up // 3600), int(up % 3600 // 60), int(up % 60)
+        # 走查第十四批 Bug 1：tooltip 的 IP 同样实时取（随秒级 ticker 刷新，
+        # 绝不缓存启动值），并按 "IPv4: x / IPv6: y" 标明协议；取数失败
+        # 降级省略该行，不影响状态/连接/运行时长显示。
+        try:
+            ips = " · ".join(get_display_ips())
+        except Exception as exc:  # noqa: BLE001 - 展示降级，不阻断托盘
+            _LOG.debug("tray_tooltip_ip_failed", error=repr(exc))
+            ips = ""
         self._icon.setToolTip(
             f"远程桌面控制 v5 · {self._state_label()} · 连接 {self._client_count}"
             + (f" · 运行 {h:02d}:{m:02d}:{s:02d}" if up else "")
+            + (f"\n{ips}" if ips else "")
         )
