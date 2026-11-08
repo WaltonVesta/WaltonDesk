@@ -145,6 +145,57 @@ class TestServeFirstRun:
         )
 
 
+    def test_first_run_plaintext_printed_even_if_start_fails(
+        self, tmp_app_dir: Path, mem_store: _MemStore, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """走查第十四批 Bug 3：首启明文在 service.start() **之前**打印。
+
+        旧实现把回显排在 start 成功之后的横幅里——端口被占 / 证书重建失败
+        即 return 1，密码已生成落库却永不显示（用户只见日志、连不上）。
+        本例把 HostService.start 打成 False：rc==1，但明文必须已在 stdout。
+        """
+        import rdc.server.service as svc_mod
+
+        class _FailService:
+            def __init__(self, **kw: object) -> None:
+                pass
+
+            async def start(self) -> bool:
+                return False
+
+            async def shutdown(self) -> None:
+                pass
+
+        monkeypatch.setattr(svc_mod, "HostService", _FailService)
+        # 首启明文由 _run_serve 生成后经此参数传入 headless（本例直接给定，
+        # 精确验证"start 失败也要先打印"这条改动路径）。
+        pw = "Abcd2345"
+        sm.reset_for_test()
+        try:
+            rc = cli._run_serve_headless(sm.Settings(), first_run_password=pw)
+        finally:
+            sm.reset_for_test()
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert pw in out, "start 失败也必须先给用户看到首启明文"
+
+    def test_first_run_printed_once_no_duplicate_notice(
+        self, mem_store: _MemStore, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """提前打印与横幅回显不重复：include_notice=False 时横幅不再打第二遍。
+
+        headless 首启链路 = 提前块打印明文（start 成败都有）+ 横幅
+        ``include_notice=not first_run_password`` → False。本例直测该开关。
+        """
+        s = sm.Settings()
+        pw = ip.ensure_host_password(s).password
+        cli._print_host_banner(object(), s, pw, include_notice=False)  # noqa: SLF001
+        out = capsys.readouterr().out
+        assert "被控端已启动" in out
+        assert pw not in out, "首启明文已由提前块打印，横幅不得重复回显"
+
+
 class TestSetPasswordClearsAutogen:
     def test_marks_user_set_and_deletes_plaintext(
         self, tmp_app_dir: Path, mem_store: _MemStore, monkeypatch: pytest.MonkeyPatch

@@ -185,6 +185,14 @@ async def host_session(
     # 此处直接投递；托盘不可用时降级日志，不静默（第十三批 Bug 2）。
     if notice and not tray.notify_initial_password(notice):
         _LOG.warning("initial_password_notice_no_tray")
+    # 走查第十四批 Bug 3：GUI 模式补**保底弹窗**——气泡常被通知中心折叠
+    # 吞掉、--windowed/--silent 下控制台 print 也不可见，真机用户三处拿不
+    # 到密码。弹窗非阻塞（服务继续跑），明文大字号可选复制，勾选"不再
+    # 提示"经 _suppress_notice 持久化（与气泡点击同一落库路径）。
+    if plaintext:
+        from rdc.ui.initial_password_dialog import present_initial_password_dialog
+
+        present_initial_password_dialog(plaintext, on_suppress=_suppress_notice)
     try:
         await stop.wait()
     finally:

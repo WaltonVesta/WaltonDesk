@@ -160,3 +160,238 @@ class TestTogglePause:
         svc, tray, lock = _FakeService(fail=True), _FakeTray(), asyncio.Lock()
         await _toggle_pause(svc, tray, lock)  # type: ignore[arg-type]
         assert tray.states == [TrayState.RUNNING], "失败后服务仍在运行，文案不得谎报已暂停"
+
+
+# ---------------------------------------------------------------------------
+# host_session 首启密码可见性接线（走查第十四批 Bug 3：三通道保底）
+# ---------------------------------------------------------------------------
+
+
+class _MemStore:
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    @property
+    def name(self) -> str:
+        return "mem"
+
+    def available(self) -> bool:
+        return True
+
+    def save(self, key: str, value: str) -> None:
+        self.data[key] = value
+
+    def load(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+
+class _NoopService:
+    """被控端服务替身：start 成功、shutdown 空转（不占端口、不触 TLS）。"""
+
+    def __init__(self, **kw: object) -> None:
+        self.shutdown_calls = 0
+
+    async def start(self) -> bool:
+        return True
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def _stub_tray_cls():
+    """真信号托盘替身：show() 后 singleShot 触发 quitRequested 停机制。"""
+    from PySide6.QtCore import QObject, QTimer, Signal
+
+    class _StubTray(QObject):
+        pauseToggled = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+        restartRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+        quitRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+        autostartToggled = Signal(bool, bool)  # noqa: N815 - 须与 Qt 真实信号同名
+        changePasswordRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+        noticeSuppressed = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+
+        def __init__(self, **kw: object) -> None:
+            super().__init__()
+            self.bubbles: list[str] = []
+            self.hidden = False
+
+        def set_state(self, state: str, **kw: object) -> None:
+            pass
+
+        def update_client_count(self, count: int) -> None:
+            pass
+
+        def show(self) -> None:
+            QTimer.singleShot(15, self.quitRequested.emit)
+
+        def hide(self) -> None:
+            self.hidden = True
+
+        def notify_initial_password(self, text: str, **kw: object) -> bool:
+            self.bubbles.append(text)
+            return True
+
+    return _StubTray
+
+
+class TestHostSessionInitialPassword:
+    def test_first_run_prints_bubbles_and_opens_dialog(
+        self, tmp_app_dir, monkeypatch: pytest.MonkeyPatch, qapp
+    ) -> None:
+        """首启明文在 GUI 装配路径三通道齐：控制台 print + 托盘气泡 + 保底弹窗。
+
+        真机病灶（第十四批 Bug 3）：用户删库重开走的是 ``rdc`` 无参 →
+        Launcher → HOST 路径，明文只进日志 info，控制台/气泡/弹窗全无。
+        本例真跑 host_session（服务/托盘打桩、密钥库内存替身），断言三通道
+        都拿到**当次生成的明文**。
+        """
+        import rdc.server.initial_password as ip_mod
+        import rdc.ui.initial_password_dialog as dlg_mod
+        import rdc.ui.session as sess_mod
+        from rdc.secrets.factory import StoreSelection
+        from tests.unit.test_ui_dialogs import drive
+
+        store = _MemStore()
+        monkeypatch.setattr(
+            ip_mod,
+            "get_secret_store",
+            lambda *a, **k: StoreSelection(store=store, degraded=False, reason=""),
+        )
+        monkeypatch.setattr(sess_mod, "HostService", _NoopService)
+        stub = _stub_tray_cls()
+        tray_holder: dict[str, object] = {}
+
+        def _make_tray(*a: object, **k: object) -> object:
+            t = stub()
+            tray_holder["t"] = t
+            return t
+
+        monkeypatch.setattr(sess_mod, "TrayController", _make_tray)
+        presented: list[str] = []
+        monkeypatch.setattr(
+            dlg_mod,
+            "present_initial_password_dialog",
+            lambda pw, on_suppress=None: presented.append(pw),
+        )
+        from rdc.config.settings import Settings
+
+        assert drive(qapp, lambda: sess_mod.host_session(qapp, Settings())) == 0
+        pw = store.data[ip_mod.INITIAL_PASSWORD_SECRET_KEY]
+        assert pw, "首启应已生成明文"
+        tray = tray_holder["t"]
+        assert presented == [pw], "保底弹窗必须收到当次明文（Bug 3 核心）"
+        assert tray.bubbles and pw in tray.bubbles[0], "托盘气泡必须含明文"
+
+    def test_dialog_presented_even_if_tray_unavailable(
+        self, tmp_app_dir, monkeypatch: pytest.MonkeyPatch, qapp
+    ) -> None:
+        """气泡不可用（无系统托盘）时，保底弹窗仍必须出现（三通道独立）。"""
+        import rdc.server.initial_password as ip_mod
+        import rdc.ui.initial_password_dialog as dlg_mod
+        import rdc.ui.session as sess_mod
+        from rdc.secrets.factory import StoreSelection
+        from tests.unit.test_ui_dialogs import drive
+
+        store = _MemStore()
+        monkeypatch.setattr(
+            ip_mod,
+            "get_secret_store",
+            lambda *a, **k: StoreSelection(store=store, degraded=False, reason=""),
+        )
+        monkeypatch.setattr(sess_mod, "HostService", _NoopService)
+
+        from PySide6.QtCore import QObject, QTimer, Signal
+
+        class _NoBubbleTray(QObject):
+            pauseToggled = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+            restartRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+            quitRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+            autostartToggled = Signal(bool, bool)  # noqa: N815 - 须与 Qt 真实信号同名
+            changePasswordRequested = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+            noticeSuppressed = Signal()  # noqa: N815 - 须与 Qt 真实信号同名
+
+            def set_state(self, s: str, **k: object) -> None:
+                pass
+
+            def update_client_count(self, n: int) -> None:
+                pass
+
+            def show(self) -> None:
+                QTimer.singleShot(15, self.quitRequested.emit)
+
+            def hide(self) -> None:
+                pass
+
+            def notify_initial_password(self, t: str, **k: object) -> bool:
+                return False  # 无系统托盘
+
+        monkeypatch.setattr(sess_mod, "TrayController", lambda *a, **k: _NoBubbleTray())
+        presented: list[str] = []
+        monkeypatch.setattr(
+            dlg_mod,
+            "present_initial_password_dialog",
+            lambda pw, on_suppress=None: presented.append(pw),
+        )
+        from rdc.config.settings import Settings
+
+        assert drive(qapp, lambda: sess_mod.host_session(qapp, Settings())) == 0
+        assert presented, "气泡不可用时保底弹窗仍须出现，绝不静默"
+
+
+# ---------------------------------------------------------------------------
+# 首启密码弹窗（走查第十四批 Bug 3：保底通道本体）
+# ---------------------------------------------------------------------------
+
+
+class TestInitialPasswordDialog:
+    def test_plaintext_shown_selectable(self, qtbot) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+
+        from rdc.ui.initial_password_dialog import InitialPasswordDialog
+
+        app = QApplication.instance()
+        dlg = InitialPasswordDialog("Zx9QwErT")
+        qtbot.addWidget(dlg)
+        assert dlg.value_label.text() == "Zx9QwErT"
+        flags = dlg.value_label.textInteractionFlags()
+        assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
+        dlg._copy()  # noqa: SLF001
+        assert app is not None and app.clipboard().text() == "Zx9QwErT"
+
+    def test_suppress_checkbox_fires_callback_on_close(self, qtbot) -> None:
+        from rdc.ui.initial_password_dialog import InitialPasswordDialog
+
+        seen: list[int] = []
+        dlg = InitialPasswordDialog("Abcd2345")
+        qtbot.addWidget(dlg)
+        dlg.finished.connect(
+            lambda _r: seen.append(1) if dlg.suppress_requested else None
+        )
+        dlg.suppress_check.setChecked(True)
+        dlg._accept()  # noqa: SLF001
+        assert dlg.suppress_requested is True
+        assert seen == [1]
+
+    def test_no_suppress_by_default(self, qtbot) -> None:
+        from rdc.ui.initial_password_dialog import InitialPasswordDialog
+
+        dlg = InitialPasswordDialog("Abcd2345")
+        qtbot.addWidget(dlg)
+        dlg._accept()  # noqa: SLF001
+        assert dlg.suppress_requested is False
+
+    def test_present_is_nonblocking_and_keeps_alive(self, qtbot, qapp) -> None:
+        """present 立即返回（非模态不卡协程），且引用保活不被 GC 提前销毁。"""
+        import gc
+
+        from rdc.ui.initial_password_dialog import present_initial_password_dialog
+
+        dlg = present_initial_password_dialog("Qw7Er9Ty", on_suppress=lambda: None)
+        qtbot.addWidget(dlg)
+        gc.collect()  # 旧坑：无持有引用时 C++ 对象先亡 → "Internal C++ object already deleted"
+        assert dlg.isVisible()
+        assert dlg.value_label.text() == "Qw7Er9Ty"

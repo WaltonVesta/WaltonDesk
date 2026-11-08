@@ -122,6 +122,18 @@ def _run_serve_headless(
     async def _amain() -> int:
         import signal as _signal
 
+        # 走查第十四批 Bug 3：首启明文在 **start 之前**打印。旧实现把回显
+        # 排在 service.start() 成功之后，端口被占 / 证书重建失败即 return 1
+        # ——此时 ensure_host_password 早已生成并落库明文（_run_serve），用户
+        # 却拿不到密码（只见日志 info），与 GUI 路径同类病灶。silent 只跳过
+        # 常规横幅，不吞首启密码（否则开机自启首启用户永远不知道密码）。
+        if first_run_password:
+            from rdc.console_safety import console_stream
+            from rdc.server.initial_password import first_run_notice_text
+
+            print("=" * 48, file=console_stream())
+            print(first_run_notice_text(first_run_password), file=console_stream())
+            print("=" * 48, file=console_stream())
         service = HostService(settings=settings, show_tray=False)
         if not await service.start():
             _LOG.error("cli_serve_start_failed")
@@ -135,7 +147,9 @@ def _run_serve_headless(
             with contextlib.suppress(NotImplementedError):  # Windows Proactor 部分信号不支持
                 loop.add_signal_handler(sig, stop.set)
         if not silent:
-            _print_host_banner(service, settings, first_run_password)
+            # 首启明文已由上方提前块打印 → 横幅跳过回显段防重复；
+            # 非首启则保留横幅的回读态回显（受"不再提示"约束）。
+            _print_host_banner(service, settings, include_notice=not first_run_password)
         try:
             await stop.wait()
         finally:
@@ -176,7 +190,11 @@ def _run_gui_with(
 
 
 def _print_host_banner(  # nosec B107 -- first_run_password 形参默认空串是"非首启"哨兵，非硬编码口令
-    service: object, settings: Settings, first_run_password: str = ""
+    service: object,
+    settings: Settings,
+    first_run_password: str = "",
+    *,
+    include_notice: bool = True,
 ) -> None:
     """控制台就绪提示（地址/端口/开关无敏感值；Feature 18 追加初始口令显眼回显）。
 
@@ -184,6 +202,10 @@ def _print_host_banner(  # nosec B107 -- first_run_password 形参默认空串�
     格式化——**不再**依赖密钥库回读（旧实现 DPAPI 回读失败即整段静默，
     用户只见"已生成"日志不见密码）。``first_run_password`` 为空（非首启）
     才走 :func:`_initial_notice_text_safe`（回读态，受"不再提示"约束）。
+
+    走查第十四批 Bug 3：``include_notice=False`` 跳过口令回显段——headless
+    首启明文已在 start **之前**单独打印（服务启动失败也要让用户看到密码），
+    此处再打第二遍就是重复刷屏。非首启（无提前块）保持回显。
     写入统一经 :func:`rdc.console_safety.console_stream`：``--windowed`` 下
     ``sys.stdout`` 为 ``None``，裸 ``print`` 会抛 "lost sys.stdout"。
     """
@@ -195,6 +217,8 @@ def _print_host_banner(  # nosec B107 -- first_run_password 形参默认空串�
         f"(Ctrl+C 退出)",
         file=out,
     )
+    if not include_notice:
+        return
     notice = _first_run_notice_text_safe(first_run_password) or _initial_notice_text_safe(
         settings
     )
