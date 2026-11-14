@@ -1,7 +1,8 @@
 """被控端托盘（阶段 6.10，v4 gui/tray.py 迁移，pystray → QSystemTrayIcon）。
 
 v4 用 pystray（本机实测未安装）+ PIL 画图标；v5 用 Qt 原生托盘 + QPainter
-绘制 16px 圆形状态图标（绿=运行/橙=暂停/灰=停止），零新依赖。
+绘制状态图标，零新依赖。阶段 10 起底图换为 WaltonDesk 品牌图标（包内
+``theme/icon.ico``），右下角叠状态角标（绿=运行/橙=暂停/灰=停止）。
 
 菜单（v4 全保留）：状态 / 复制 IPv4 / 复制 IPv6 / 暂停·恢复 / 重启服务 / 退出。
 """
@@ -12,12 +13,14 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu
 
+from rdc.brand import BRAND_NAME
 from rdc.host.netinfo import get_display_ips, get_local_ip_v6, get_preferred_ipv4
 from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
+from rdc.ui.icons import build_app_icon
 from rdc.ui.theme.tokens import TOKENS
 
 if TYPE_CHECKING:
@@ -42,8 +45,17 @@ class TrayState:
     }
 
 
-def build_tray_icon(state: str = TrayState.RUNNING, size: int = 16) -> QIcon:
-    """QPainter 绘制托盘图标：圆底 + 状态点。"""
+def _brand_pixmap(size: int) -> QPixmap | None:
+    """取品牌图标的指定尺寸位图；资源缺失/解不出返回 ``None``（调用方回落）。"""
+    icon = build_app_icon()
+    if icon is None:
+        return None
+    pix = icon.pixmap(size, size)
+    return None if pix.isNull() else pix
+
+
+def _legacy_status_icon(state: str, size: int) -> QIcon:
+    """无品牌资源时的兜底画法：圆底 + 居中状态点（阶段 6.10 原实现）。"""
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
@@ -57,6 +69,30 @@ def build_tray_icon(state: str = TrayState.RUNNING, size: int = 16) -> QIcon:
     p.setBrush(dot)
     d = size * 0.45
     p.drawEllipse(int((size - d) / 2), int((size - d) / 2), int(d), int(d))
+    p.end()
+    return QIcon(pix)
+
+
+def build_tray_icon(state: str = TrayState.RUNNING, size: int = 16) -> QIcon:
+    """托盘图标：WaltonDesk 品牌底图 + 右下角状态角标。
+
+    阶段 10 接入品牌图标：底图来自包内 ``icon.ico``（与窗口图标同一资源），
+    右下角叠状态点（绿=运行/橙=暂停/灰=停止）并描白色环——在 Windows 深浅
+    两种任务栏底色下都看得清。
+
+    资源缺失时回落 :func:`_legacy_status_icon`（纯色圆点），托盘**始终**可用：
+    图标是外观问题，不能成为被控端起不来的原因。
+    """
+    pix = _brand_pixmap(size)
+    if pix is None:
+        return _legacy_status_icon(state, size)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    dot = TrayState._COLORS.get(state, TrayState._COLORS[TrayState.STOPPED])
+    d = max(4, int(size * 0.42))
+    p.setPen(QPen(QColor("#FFFFFF"), max(1, size // 12)))
+    p.setBrush(dot)
+    p.drawEllipse(size - d - 1, size - d - 1, d, d)
     p.end()
     return QIcon(pix)
 
@@ -183,7 +219,7 @@ class TrayController(QObject):
         #    disconnect()/connect()——PySide6 对无连接信号调用 disconnect
         #    必发 RuntimeWarning（真机终端警告源头）。
         QTimer.singleShot(0, lambda: self._icon.showMessage(
-            "远程桌面控制 · 初始密码", text, build_tray_icon(TrayState.RUNNING), timeout_ms
+            f"{BRAND_NAME} · 初始密码", text, build_tray_icon(TrayState.RUNNING), timeout_ms
         ))
         self._notice_pending = True
         return True
@@ -333,7 +369,7 @@ class TrayController(QObject):
             _LOG.debug("tray_tooltip_ip_failed", error=repr(exc))
             ips = ""
         self._icon.setToolTip(
-            f"远程桌面控制 v5 · {self._state_label()} · 连接 {self._client_count}"
+            f"{BRAND_NAME} · {self._state_label()} · 连接 {self._client_count}"
             + (f" · 运行 {h:02d}:{m:02d}:{s:02d}" if up else "")
             + (f"\n{ips}" if ips else "")
         )

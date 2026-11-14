@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from rdc import __version__
+from rdc.brand import BRAND_NAME
+from rdc.config.paths import migrate_legacy_root
 from rdc.config.settings import Settings, load_settings, save_settings, set_current
 from rdc.console_safety import console_stream, stdin_is_absent, stdin_is_tty
 from rdc.logging import get_logger
@@ -42,13 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         配置好的 ``ArgumentParser`` 实例。
     """
     parser = argparse.ArgumentParser(
-        prog="rdc",
-        description=f"远程桌面控制 v{__version__}",
+        prog="waltondesk",
+        description=f"{BRAND_NAME} v{__version__}",
     )
     parser.add_argument(
         "--version",
         action="version",
-        version=f"远程桌面控制 v{__version__}",
+        version=f"{BRAND_NAME} v{__version__}",
     )
     parser.add_argument(
         "--gui",
@@ -408,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         进程退出码，0 表示成功。
     """
+    # 阶段 10 品牌更名：必须在**任何配置/密钥/日志读取之前**执行，否则各条
+    # 路径已在旧目录定型（load_settings 甚至会在缺失时直接新建空配置并落盘，
+    # 把"迁移"永久堵死）。函数内部幂等且吞异常，不会因迁移失败炸掉启动。
+    migrate_legacy_root()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "serve":

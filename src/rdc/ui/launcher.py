@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rdc.brand import brand_title
 from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.theme.tokens import TOKENS
@@ -74,7 +75,7 @@ class LauncherDialog(QDialog):
 
             autostart_set = set_autostart
         self._autostart_set = autostart_set
-        self.setWindowTitle("远程桌面控制 v5")
+        self.setWindowTitle(brand_title())
         self.setMinimumWidth(340)
         lay = QVBoxLayout(self)
         title = QLabel("选择启动模式")

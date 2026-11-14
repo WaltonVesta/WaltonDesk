@@ -28,6 +28,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QImage, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
+from rdc.brand import brand_title
 from rdc.config.settings import (
     Settings,
     apply_validators,
@@ -40,6 +41,7 @@ from rdc.logging import get_logger
 from rdc.ui.app import ensure_gui_thread
 from rdc.ui.clipboard_sync import ClipboardSync
 from rdc.ui.fingerprint_dialog import confirm_fingerprint
+from rdc.ui.icons import build_app_icon
 from rdc.ui.password_dialog import request_password
 from rdc.ui.performance_panel import PerformancePanel
 from rdc.ui.screen_view import ScreenView
@@ -181,7 +183,10 @@ class MainWindow(QMainWindow):
         #: 归零自动恢复连接按钮。None = 无倒计时。
         self._ban_timer: QTimer | None = None
         self._ban_remaining_s = 0
-        self.setWindowTitle("远程桌面控制 v5 — 主控端")
+        self.setWindowTitle(brand_title("主控端"))
+        app_icon = build_app_icon()
+        if app_icon is not None:
+            self.setWindowIcon(app_icon)
         self.resize(1080, 720)
 
         central = QWidget()

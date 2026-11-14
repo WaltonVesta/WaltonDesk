@@ -39,6 +39,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QPushButton
 
 from rdc import cli
+from rdc.brand import brand_title
 from rdc.client.controller import ClientController
 from rdc.ui import session as session_mod
 from rdc.ui.app import create_app
@@ -46,7 +47,9 @@ from rdc.ui.launcher import LauncherDialog
 from rdc.ui.main_window import MainWindow
 
 _WATCHDOG_MS = 5000
-_MAIN_TITLE = "远程桌面控制 v5 — 主控端"
+# 阶段 10 更名：标题从品牌来源取（本哨兵锁的是"launcher→主窗交接真完成"，
+# 不是标题字符串本身；写死字面值会让每次改文案都误报成交接坏了）。
+_MAIN_TITLE = brand_title("主控端")
 
 
 @pytest.fixture()

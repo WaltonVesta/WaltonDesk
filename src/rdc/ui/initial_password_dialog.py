@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rdc.brand import brand_title
 from rdc.ui.app import ensure_gui_thread
 
 __all__ = ["InitialPasswordDialog", "present_initial_password_dialog"]
@@ -43,7 +44,7 @@ class InitialPasswordDialog(QDialog):
         super().__init__(parent)
         self._password = password
         self.suppress_requested = False
-        self.setWindowTitle("远程桌面控制 v5 — 初始密码")
+        self.setWindowTitle(brand_title("初始密码"))
         self.setModal(False)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 16)

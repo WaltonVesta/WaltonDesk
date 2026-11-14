@@ -30,10 +30,18 @@ from pathlib import Path
 
 from rdc.logging import get_logger
 
-__all__ = ["AutostartManager", "REGISTRY_RUN_KEY"]
+__all__ = ["AutostartManager", "REGISTRY_RUN_KEY", "SERVICE_NAME", "LEGACY_SERVICE_NAME"]
 
 #: HKCU 自启动注册表位置（值名 = service_name）。
 REGISTRY_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+#: 阶段 10 品牌更名：注册表值名 / plist / unit 名统一用它。
+SERVICE_NAME = "WaltonDesk"
+
+#: 更名前的旧值名。用户若曾勾选自启，旧项指向过时的解释器/脚本路径，开机
+#: 既拉不起新程序又与新项并存（表现为"勾了自启却没生效"）。install/uninstall
+#: 顺带清理它；query 在仅有旧项时仍如实报"已开启"（托盘勾选态不失真）。
+LEGACY_SERVICE_NAME = "RemoteControlService"
 
 _LOG = get_logger("host.autostart")
 
@@ -53,7 +61,8 @@ class AutostartManager:
     """开机自启动管理器（Windows 注册表 / macOS launchd / Linux systemd）。
 
     Args:
-        service_name: 注册表值名 / plist 与 unit 文件名。
+        service_name: 注册表值名 / plist 与 unit 文件名（默认品牌名
+            :data:`SERVICE_NAME`；阶段 10 前为 ``RemoteControlService``）。
         python_path: 解释器路径（测试注入）。
         frozen: 是否打包形态（``None`` = 读 ``sys.frozen`` 事实；测试注入）。
         exe_path: frozen 形态的可执行文件路径（``None`` = ``sys.executable``）。
@@ -61,7 +70,7 @@ class AutostartManager:
 
     def __init__(
         self,
-        service_name: str = "RemoteControlService",
+        service_name: str = SERVICE_NAME,
         *,
         python_path: str | None = None,
         frozen: bool | None = None,
@@ -141,8 +150,27 @@ class AutostartManager:
             winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY, 0, winreg.KEY_SET_VALUE
         ) as regkey:
             winreg.SetValueEx(regkey, self.service_name, 0, winreg.REG_SZ, command)
+            self._drop_legacy_value(regkey)
         _LOG.info("autostart_windows_installed", command=command)
         return True
+
+    def _drop_legacy_value(self, regkey: object) -> None:
+        """删除更名前的旧自启值（幂等，失败不阻断本次注册）。
+
+        只在 ``service_name`` 就是当前品牌名时清理——显式传入自定义服务名
+        （多实例/测试场景）时不得越界删除别人的条目。
+        """
+        if self.service_name != SERVICE_NAME:
+            return
+        import winreg
+
+        try:
+            winreg.DeleteValue(regkey, LEGACY_SERVICE_NAME)  # type: ignore[arg-type]
+            _LOG.info("autostart_legacy_value_removed", legacy=LEGACY_SERVICE_NAME)
+        except FileNotFoundError:
+            pass  # 从未勾过自启：正常路径
+        except OSError as exc:  # noqa: BLE001 - 清理失败不影响新项已写入的事实
+            _LOG.warning("autostart_legacy_value_remove_failed", error=repr(exc))
 
     def _uninstall_windows(self) -> bool:
         import winreg
@@ -155,6 +183,8 @@ class AutostartManager:
                 _LOG.info("autostart_windows_uninstalled")
             except FileNotFoundError:
                 pass  # 本就未注册：幂等成功
+            # 取消勾选时一并清掉旧名残留，否则它会继续开机拉起旧路径
+            self._drop_legacy_value(regkey)
         return True
 
     def _query_windows(self) -> bool:
@@ -163,9 +193,19 @@ class AutostartManager:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY) as regkey:
                 value, _type = winreg.QueryValueEx(regkey, self.service_name)
+                return bool(value)
         except FileNotFoundError:
+            pass
+        # 新名没有：回读旧名，如实反映"用户确实勾过自启"（托盘勾选态不至于
+        # 显示未开启、用户点一下却什么都没发生）。
+        if self.service_name != SERVICE_NAME:
             return False
-        return bool(value)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_RUN_KEY) as regkey:
+                legacy_value, _type = winreg.QueryValueEx(regkey, LEGACY_SERVICE_NAME)
+        except (FileNotFoundError, OSError):
+            return False
+        return bool(legacy_value)
 
     # -- macOS：launchd（v4 行为保留，仅统一 serve 子命令） -----------------------
 

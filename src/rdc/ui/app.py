@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING, Any, Final, TypeVar
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QApplication
 
+from rdc.brand import BRAND_NAME
 from rdc.logging import get_logger
+from rdc.ui.icons import build_app_icon
 from rdc.ui.theme.tokens import TOKENS
 
 if TYPE_CHECKING:
@@ -70,6 +72,14 @@ def create_app(argv: Sequence[str] | None = None) -> QApplication:
         app = QApplication(list(argv) if argv is not None else [])
     if not app.styleSheet():
         app.setStyleSheet(load_stylesheet())
+    # 阶段 10 品牌接入：应用名 + 默认窗口图标。图标设在 QApplication 上，
+    # 主窗/启动器/设置/口令等**全部**窗口自动继承（漏设单个窗体不再可能）；
+    # 主窗另显式 setWindowIcon 一次，防 pytest-qt 复用已有 app 实例时
+    # 本函数的缓存路径未覆盖到。
+    app.setApplicationName(BRAND_NAME)
+    icon = build_app_icon()
+    if icon is not None and app.windowIcon().isNull():
+        app.setWindowIcon(icon)
     return app
 
 

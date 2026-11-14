@@ -6,16 +6,20 @@ build-backend = "hatchling.build"
 # PEP 621 项目元数据
 # ============================================================================
 [project]
-name = "rdc"
+# 阶段 10：发行名 rdc → waltondesk（品牌更名）。
+# ⚠️ **导入包名仍为 `rdc`**（src/rdc/）：只改发行元数据与 CLI 入口名，不动
+# import 路径——否则上千处 import、mypy `packages`、`pythonpath` 与全部
+# `python -m rdc` 形态（开机自启依赖）连带变更，收益为零风险极高。
+name = "waltondesk"
 version = "5.0.0"
-description = "远程桌面控制 — 跨平台主控端/被控端，asyncio + PySide6 + H.264"
+description = "WaltonDesk — 跨平台远程桌面主控端/被控端，asyncio + PySide6 + H.264"
 readme = "README.md"
 # numpy>=2.5 要求 Python >=3.12（其存根用 PEP 695 type 语句），故下限锁 3.12。
 # 见 PROGRESS.md 发现 1 与用户 2026-09-20 确认的方案 A。
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "RemoteDesktop Control Team" }]
-keywords = ["remote-desktop", "remote-control", "pyside6", "asyncio", "h264"]
+authors = [{ name = "WaltonDesk Team" }]
+keywords = ["waltondesk", "remote-desktop", "remote-control", "pyside6", "asyncio", "h264"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: X11 Applications :: Qt",
@@ -72,11 +76,13 @@ linux-secrets = ["secretstorage>=3.3; sys_platform == 'linux'"]
 macos-secrets = ["pyobjc-framework-Security>=10.0; sys_platform == 'darwin'"]
 
 [project.scripts]
-rdc = "rdc.cli:main"
+# 阶段 10：入口 `rdc` → `waltondesk`（目标函数不变，仍是 rdc.cli:main）。
+# 源码/venv 形态的 `python -m rdc` 不受影响（包名未改），开机自启命令照旧可用。
+waltondesk = "rdc.cli:main"
 
 [project.urls]
-Homepage = "https://example.invalid/rdc"
-Changelog = "https://example.invalid/rdc/blob/master/CHANGELOG.md"
+Homepage = "https://example.invalid/waltondesk"
+Changelog = "https://example.invalid/waltondesk/blob/master/CHANGELOG.md"
 
 # ============================================================================
 # PEP 735 依赖组（开发/测试/打包），不进入发布产物
