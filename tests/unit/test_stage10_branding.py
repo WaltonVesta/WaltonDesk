@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from rdc.brand import BRAND_NAME, brand_title
+from rdc.brand import BRAND_NAME, SERVICE_ID, brand_title
 from rdc.config import paths
 
 
@@ -279,6 +279,118 @@ class TestMigrateLegacyRoot:
         with pytest.raises(SystemExit):
             cli.main(["--version"])
         assert calls == ["migrate"]
+
+
+class TestServiceIdentifier:
+    """服务标识单点：注册表值名与 PID 文件同名，且不残留旧品牌。"""
+
+    def test_pid_file_uses_service_id(self) -> None:
+        from rdc.server.service import _SERVER_NAME
+
+        assert _SERVER_NAME == SERVICE_ID == "WaltonDesk"
+
+    def test_no_old_brand_in_user_visible_literals(self) -> None:
+        """用户可见字符串字面量里不得残留旧品牌名。
+
+        只扫**字符串常量**（AST 提取，排除 docstring），不扫注释——注释里
+        解释"阶段 10 前叫 X"是正当的历史记录，用白名单硬豁免反而脆弱。
+        真正会造成用户可见残留的是字面量：窗口标题、tooltip、气泡、文件名。
+
+        刻意保留的三类旧值（改了静默破坏存量状态，见 brand.py docstring）
+        不在扫描目标内：它们不含"远程桌面控制"，且 RemoteControlService 已
+        改由 LEGACY_SERVICE_NAME 常量承载——这里额外把它们列白以防误加。
+        """
+        import ast
+
+        # 文件顶部的 Path 直接复用，不再起缩写别名（ruff N817）
+        src_root = Path(__file__).resolve().parents[2] / "src" / "rdc"
+        # 精确白名单：RemoteControlService 只允许作为 autostart 的"旧值清理锚点"
+        # （LEGACY_SERVICE_NAME）存在——删了它，用户装过旧版勾过自启就永远清不掉。
+        # "远程桌面控制" 零容忍：src 里没有任何合法的旧中文名保留理由。
+        allowed_files = {"RemoteControlService": {"autostart.py"}}
+        offenders: list[str] = []
+
+        for f in sorted(src_root.rglob("*.py")):
+            if "pb" in f.parts:
+                continue  # protoc 生成物
+            # utf-8-sig：本仓库存量源码里就有 6 个文件带 UTF-8 BOM（v4 搬迁期
+            # 遗留，实测 diff/framerate/mss_source/netinfo/power/autostart）。
+            # Python 解释器按 PEP 263 接受 BOM，所以 ruff/mypy/运行全绿；但
+            # 用裸 utf-8 读会让 BOM 变成源码首字符 U+FEFF，ast.parse 抛
+            # SyntaxError。本文件对 config 的 BOM 修复正是同一课。
+            tree = ast.parse(f.read_text(encoding="utf-8-sig"), filename=str(f))
+            docstring_ids: set[int] = set()
+            for node in ast.walk(tree):
+                if isinstance(
+                    node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+                ):
+                    body = getattr(node, "body", [])
+                    if body and isinstance(body[0], ast.Expr) and isinstance(
+                        body[0].value, ast.Constant
+                    ) and isinstance(body[0].value.value, str):
+                        docstring_ids.add(id(body[0].value))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or id(node) in docstring_ids:
+                    continue
+                val = node.value
+                if not isinstance(val, str):
+                    continue
+                for old in ("远程桌面控制", "RemoteControlService"):
+                    if old in val and f.name not in allowed_files.get(old, set()):
+                        offenders.append(f"{f.name}:{node.lineno}: {val[:70]!r}")
+
+        assert not offenders, (
+            "旧品牌名残留在用户可见字面量中（更名不彻底）:\n" + "\n".join(offenders)
+        )
+
+
+class TestConfigBomTolerance:
+    """配置读取必须容忍 UTF-8 BOM（打包冒烟实测发现的真实健壮性缺口）。
+
+    记事本（Win10 1903+ 默认存带 BOM 的 UTF-8）编辑过 config.json 后，裸
+    utf-8 解码会让 json.loads 抛 "Unexpected UTF-8 BOM" → 走"损坏"分支：
+    **整份配置被改名成 .corrupt 并用默认值重建**，用户表现为"设置和口令
+    突然全没了"。
+    """
+
+    def test_bom_config_loads_not_treated_as_corrupt(
+        self, tmp_app_dir: Path
+    ) -> None:
+        from rdc.config.settings import load_settings, save_settings
+
+        cfg = tmp_app_dir / "config.json"
+        # 先正常写一份，再手工加 BOM 覆写（模拟记事本另存）
+        settings = load_settings(cfg)
+        settings.control_port = 23456
+        save_settings(settings, cfg)
+        body = cfg.read_bytes()
+        cfg.write_bytes(b"\xef\xbb\xbf" + body)
+
+        reloaded = load_settings(cfg)
+        assert reloaded.control_port == 23456, "带 BOM 的配置被当成损坏并重置"
+        assert not (tmp_app_dir / "config.json.corrupt").exists(), (
+            "被误判损坏→原配置已改名备份，用户设置静默丢失"
+        )
+
+    def test_own_written_files_have_no_bom(self, tmp_app_dir: Path) -> None:
+        """应用自己写出的 JSON 绝不能带 BOM（修了解读、不能留写侧病灶）。
+
+        同时锁 Banlist 的读写路径未被本次修复改坏（它按 utf-8 严格解析即可，
+        BOM 只可能来自用户手工编辑的 config.json）。
+        """
+        from rdc.config.settings import load_settings, save_settings
+        from rdc.server.banlist import Banlist
+
+        cfg = tmp_app_dir / "config.json"
+        save_settings(load_settings(cfg), cfg)
+        assert not cfg.read_bytes().startswith(b"\xef\xbb\xbf")
+
+        bl = Banlist(path=tmp_app_dir / "banlist.json")
+        bl.record_failure("1.2.3.4")
+        assert bl.failure_count("1.2.3.4") == 1
+        assert not (tmp_app_dir / "banlist.json").read_bytes().startswith(
+            b"\xef\xbb\xbf"
+        )
 
 
 class TestAutostartRegistryRename:

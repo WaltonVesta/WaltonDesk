@@ -25,10 +25,18 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     pass
 
-__all__ = ["BRAND_NAME", "brand_title"]
+__all__ = ["BRAND_NAME", "SERVICE_ID", "brand_title"]
 
 #: 产品品牌名（窗口标题、托盘提示、CLI 横幅、安装包名称的唯一来源）。
 BRAND_NAME: Final[str] = "WaltonDesk"
+
+#: 服务标识（阶段 10 品牌更名）。同一字符串复用三处，避免品牌名散落：
+#:   - Windows 自启注册表值名（``rdc.host.autostart.SERVICE_NAME``）
+#:   - macOS LaunchAgent / Linux systemd unit 文件名
+#:   - 被控端 PID 文件名（``~/.waltondesk/WaltonDesk.pid``）
+#: 更名前的旧值是 ``RemoteControlService``（见 autostart.LEGACY_SERVICE_NAME，
+#: 注册表侧有清理逻辑；PID 文件是运行时临时文件，正常退出即删，无需迁移）。
+SERVICE_ID: Final[str] = "WaltonDesk"
 
 
 def brand_title(suffix: str = "", *, with_version: bool = True) -> str:

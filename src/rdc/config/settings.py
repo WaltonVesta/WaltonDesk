@@ -225,7 +225,12 @@ def apply_validators(settings: Settings) -> list[str]:
 def _read_raw(config_path: Path) -> dict[str, Any] | None:
     """读取并解析 config.json；返回 None 表示需要新建默认配置。"""
     try:
-        raw: Any = json.loads(config_path.read_text(encoding="utf-8"))
+        # utf-8-sig：容忍 UTF-8 BOM。用户用记事本（Win10 1903+ 默认存成带 BOM 的
+        # UTF-8）或 Excel 另存过 config.json 后，裸 utf-8 解码会让 json.loads 抛
+        # "Unexpected UTF-8 BOM" → 走下面的"损坏"分支：**整份配置被改名成
+        # .corrupt 并用默认值重建**，用户表现为"改过的设置全没了、口令也没了"。
+        # 对无 BOM 的文件 utf-8-sig 与 utf-8 行为完全一致，无副作用。
+        raw: Any = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return None
     except json.JSONDecodeError as exc:

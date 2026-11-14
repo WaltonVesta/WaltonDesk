@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rdc.brand import SERVICE_ID
 from rdc.capture.desktop import is_secure_desktop
 from rdc.capture.framerate import FramerateController
 from rdc.capture.mss_source import MssScreenSource, virtual_desktop_bounds
@@ -109,7 +110,12 @@ _MODIFIER_NAMES: dict[ModifierKey, str] = {
 #: 到期封禁批清理周期（秒）。
 BAN_CLEANUP_INTERVAL_S = 60.0
 
-_SERVER_NAME = "RemoteControlService"
+#: 被控端服务标识（阶段 10 品牌更名：原 ``RemoteControlService``）。
+#: 单一来源 :data:`rdc.brand.SERVICE_ID` —— 决定 ``~/.waltondesk/WaltonDesk.pid``
+#: 文件名。PID 是运行时临时文件（正常退出即 remove，异常退出下次启动
+#: cleanup_stale 清理），不跨版本共享，故改名无需迁移；改名前遗留的
+#: ``RemoteControlService.pid`` 成为无害孤儿文件，用户可自行删除。
+_SERVER_NAME = SERVICE_ID
 
 
 class HostService:

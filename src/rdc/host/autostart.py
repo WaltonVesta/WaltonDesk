@@ -28,6 +28,7 @@ import platform
 import sys
 from pathlib import Path
 
+from rdc.brand import SERVICE_ID
 from rdc.logging import get_logger
 
 __all__ = ["AutostartManager", "REGISTRY_RUN_KEY", "SERVICE_NAME", "LEGACY_SERVICE_NAME"]
@@ -36,7 +37,8 @@ __all__ = ["AutostartManager", "REGISTRY_RUN_KEY", "SERVICE_NAME", "LEGACY_SERVI
 REGISTRY_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 #: 阶段 10 品牌更名：注册表值名 / plist / unit 名统一用它。
-SERVICE_NAME = "WaltonDesk"
+#: 单一来源 = :data:`rdc.brand.SERVICE_ID`（与 PID 文件同名，品牌不散落）。
+SERVICE_NAME = SERVICE_ID
 
 #: 更名前的旧值名。用户若曾勾选自启，旧项指向过时的解释器/脚本路径，开机
 #: 既拉不起新程序又与新项并存（表现为"勾了自启却没生效"）。install/uninstall

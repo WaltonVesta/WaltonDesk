@@ -8,6 +8,9 @@ venv/
 build/
 dist/
 *.spec
+# 阶段 10：WaltonDesk 打包配置是**交付物**，必须入库（上面的 *.spec 是
+# v4 时代 PyInstaller 临时产物的忽略规则，对本文件加例外）。
+!waltondesk.spec
 .mypy_cache/
 .ruff_cache/
 htmlcov/
