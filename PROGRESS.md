@@ -1,8 +1,8 @@
-# PROGRESS.md — remote_desktop v5.0.0 重构进度
+# PROGRESS.md — WaltonDesk v5.0.0 重构进度（原 remote_desktop / rdc）
 
-> 最后更新：2026-11-06（阶段 9 ✅ 完成收口；真机走查进行中——**十三批** ❌ 项均已修复：六批 + 第六批复测回归 `333ab13`〔VkKeyScanW argtypes〕+ 第九批 `8fd2ab1`〔Win 键释放被系统吞掉 → 按住超 2s 自动补发释放；完整钩子方案归 v5.1.0，README 新增已知限制章节；复测通过：标点/Win/其余键盘全 ✅〕+ 第十批 `fd6d1ad`〔Tab/Backtab 被 Qt 焦点链在 keyPressEvent 之前消费致控制态泄漏 → ScreenView.focusNextPrevChild 覆写 + MainWindow 应用级守卫成对转发，清单新增 3.10 项〕+ 第十一批 `6f58c46`〔被控端运行中改分辨率画面不跟随：MonitorSelector/mss 双层几何缓存致 region 过期 → 采集层 SM 包络漂移检测自动重建采集源，全链无感跟随无需手动刷新，清单新增 4.7 项〕+ **第十二批（2026-11-06，接手收尾批）：Bug 12/14/15 暂停无提示/恢复画面卡死/重启画面卡死（同一病灶链三处：`SubscriptionRegistry` 每运行周期重建修复 broadcaster `_stopped` 永久化 + `MssScreenSource.reopen()` 修复源关闭后复用 + `HostStatus(PAUSED)` 下行修复零提示，`cb68ce3`）+ Bug 19 初次连接死循环（首连网络失败绝不进重连环 + 弹窗"对方未开启被控端"，重连仅服务会话期判死，`b95fad4`）+ Bug 16 双击退化（Qt 把双击第二次按下走 `mouseDoubleClickEvent` 致漏发 press，ScreenView 覆写补成对，`f7aa867`）+ **打包守卫防御式重写**（`rdc.console_safety`：`sys.stdout/stdin is None` 形态 isatty/日志装配不崩，GUI 启动三态判定 stdin None=打包必须起窗、重定向=打印帮助，`0367dca`）+ **Feature 17 开机自启**（`host/autostart` 重写统一 `serve --tray --silent` 静默进被控端不弹 Launcher，Launcher/托盘勾选项注册失败回滚）+ **Feature 18 初始密码策略**（首启 CSPRNG 随机 8 位强口令 bcrypt 落库、明文进 DPAPI 绝不进 config，控制台/Launcher/托盘气泡显眼打印含"不再提示"持久化、托盘与 CLI 改密入口，`60ae150`——两项共享 UI 装配文件协同至全绿合并一条 commit），新增哨兵 70 项（Bug19 双向 2 + 边界对照 1 + UI 1 + Bug16 2 + 画面闭环 9〔集成 3+源 2+UI 1+controller 2+适配 1〕… 实数见 STAGE9_REPORT §6 第十二批段末：+70 = Bug19 2 + 会话期对照 1 + UI 1 + Bug16 2 + 画面闭环 9 + 守卫 13 + F17/F18 46〔14+8+10+14〕）；mypy 源文件 99→102、bandit 复扫 High/Medium/Low 全 0、`rdc.host.autostart` 移出 mypy 宽松清单兑现、`setup.py` 未动（守卫全落 `src/`），终态 1605 passed / 2 skipped 三绿退出码 0；**未测项提醒：清单 7.1 弱口令 / 7.3 日志无明文**——F18 已核验口令明文绝不入 `_LOG`（正面支撑 7.3）但需真机走查确认，7.1 待用户回报）+ **第十三批（2026-11-06）：Bug 1 托盘暂停/恢复文案不同步 `410b70c`**（探针实测根因在 transport stop 收尾顺序——3.12+ 的 wait_closed 等在途 handler 跑完，有连接时 pause 被 10s 空闲窗口拖死、is_paused 恒 False、文案不动且重复下发；修复=stop 重排 close→关会话→收任务→wait_closed + pause 入口置位 + _toggle_pause 装配层防抖锁按实际态刷新；哨兵 5）+ **Bug 2 首启密码不显示 & messageClicked 警告 `1386da0`**（明文被丢弃后横幅/气泡走 DPAPI 回读、回读失败双双静默 + 气泡同步 showMessage 被 Windows 注册时序吞 + 无连接 disconnect 实抛 SystemError；修复=first_run_notice_text 内存明文一路透传 print+气泡双路展示、QTimer.singleShot(0) 延迟投递、构建期一次性 connect 守卫，disconnect 彻底移除；哨兵 8）+ **IPv6 连接超时→v5.0.0 决策支持 `cec2bee`+`890b855`**（0.0.0.0 实测仅监听 v4；全接口语义改 AF_INET6+IPV6_V6ONLY=0 双栈监听、探测失败回退 v4 留痕 + _normalize_peer_ip 归一 ::ffff: 防封禁/白名单失配；客户端零改动；README 补 IPv6 口径；bandit B104/B107 各 1 已 nosec 附理由抑制；哨兵 6），本批哨兵 +19（1605→**1624**），三处病灶 stash 双红逐项复验转红，ruff/mypy/bandit 全零、controller 零 Qt 红线复验通过；**下一步：用户真机复测本批 3 项预期（托盘暂停文案 1s 内切换且再点不重复下发 / 删配置首启控制台显眼打印明文+托盘气泡+终端无 disconnect 警告 / 主控端填被控端 IPv6 地址直连不超时）通过后即进阶段 10（打包发布）**）
-> 配套：`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md` / `STAGE9_REPORT.md`（阶段报告；阶段 8 延后未开）
-> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）→ 阶段 9（`efd38a0` 任务书基线 → `188479d` 批0 → `44c3b2b` 批1 → `59b807c` 批2 → `f8ea292` 批3 → `f2ca14e`+`e7b6d9c` 批4 → `ab95509`/`12f6b7a`/`d07a79a`/`bfea86a`/`dde0b8a` 批5 → 收口）
+> 最后更新：2026-11-14 —— **阶段 10 ✅ 完成收口（品牌更名 + 图标接入 + 打包发布 + Windows 安装包），v4.0.3 → v5.0.0 重构彻底完工**，见文末"阶段 10"段与 [`STAGE10_REPORT.md`](STAGE10_REPORT.md)；以下长引文为阶段 9 历史记录：2026-11-06（阶段 9 ✅ 完成收口；真机走查进行中——**十三批** ❌ 项均已修复：六批 + 第六批复测回归 `333ab13`〔VkKeyScanW argtypes〕+ 第九批 `8fd2ab1`〔Win 键释放被系统吞掉 → 按住超 2s 自动补发释放；完整钩子方案归 v5.1.0，README 新增已知限制章节；复测通过：标点/Win/其余键盘全 ✅〕+ 第十批 `fd6d1ad`〔Tab/Backtab 被 Qt 焦点链在 keyPressEvent 之前消费致控制态泄漏 → ScreenView.focusNextPrevChild 覆写 + MainWindow 应用级守卫成对转发，清单新增 3.10 项〕+ 第十一批 `6f58c46`〔被控端运行中改分辨率画面不跟随：MonitorSelector/mss 双层几何缓存致 region 过期 → 采集层 SM 包络漂移检测自动重建采集源，全链无感跟随无需手动刷新，清单新增 4.7 项〕+ **第十二批（2026-11-06，接手收尾批）：Bug 12/14/15 暂停无提示/恢复画面卡死/重启画面卡死（同一病灶链三处：`SubscriptionRegistry` 每运行周期重建修复 broadcaster `_stopped` 永久化 + `MssScreenSource.reopen()` 修复源关闭后复用 + `HostStatus(PAUSED)` 下行修复零提示，`cb68ce3`）+ Bug 19 初次连接死循环（首连网络失败绝不进重连环 + 弹窗"对方未开启被控端"，重连仅服务会话期判死，`b95fad4`）+ Bug 16 双击退化（Qt 把双击第二次按下走 `mouseDoubleClickEvent` 致漏发 press，ScreenView 覆写补成对，`f7aa867`）+ **打包守卫防御式重写**（`rdc.console_safety`：`sys.stdout/stdin is None` 形态 isatty/日志装配不崩，GUI 启动三态判定 stdin None=打包必须起窗、重定向=打印帮助，`0367dca`）+ **Feature 17 开机自启**（`host/autostart` 重写统一 `serve --tray --silent` 静默进被控端不弹 Launcher，Launcher/托盘勾选项注册失败回滚）+ **Feature 18 初始密码策略**（首启 CSPRNG 随机 8 位强口令 bcrypt 落库、明文进 DPAPI 绝不进 config，控制台/Launcher/托盘气泡显眼打印含"不再提示"持久化、托盘与 CLI 改密入口，`60ae150`——两项共享 UI 装配文件协同至全绿合并一条 commit），新增哨兵 70 项（Bug19 双向 2 + 边界对照 1 + UI 1 + Bug16 2 + 画面闭环 9〔集成 3+源 2+UI 1+controller 2+适配 1〕… 实数见 STAGE9_REPORT §6 第十二批段末：+70 = Bug19 2 + 会话期对照 1 + UI 1 + Bug16 2 + 画面闭环 9 + 守卫 13 + F17/F18 46〔14+8+10+14〕）；mypy 源文件 99→102、bandit 复扫 High/Medium/Low 全 0、`rdc.host.autostart` 移出 mypy 宽松清单兑现、`setup.py` 未动（守卫全落 `src/`），终态 1605 passed / 2 skipped 三绿退出码 0；**未测项提醒：清单 7.1 弱口令 / 7.3 日志无明文**——F18 已核验口令明文绝不入 `_LOG`（正面支撑 7.3）但需真机走查确认，7.1 待用户回报）+ **第十三批（2026-11-06）：Bug 1 托盘暂停/恢复文案不同步 `410b70c`**（探针实测根因在 transport stop 收尾顺序——3.12+ 的 wait_closed 等在途 handler 跑完，有连接时 pause 被 10s 空闲窗口拖死、is_paused 恒 False、文案不动且重复下发；修复=stop 重排 close→关会话→收任务→wait_closed + pause 入口置位 + _toggle_pause 装配层防抖锁按实际态刷新；哨兵 5）+ **Bug 2 首启密码不显示 & messageClicked 警告 `1386da0`**（明文被丢弃后横幅/气泡走 DPAPI 回读、回读失败双双静默 + 气泡同步 showMessage 被 Windows 注册时序吞 + 无连接 disconnect 实抛 SystemError；修复=first_run_notice_text 内存明文一路透传 print+气泡双路展示、QTimer.singleShot(0) 延迟投递、构建期一次性 connect 守卫，disconnect 彻底移除；哨兵 8）+ **IPv6 连接超时→v5.0.0 决策支持 `cec2bee`+`890b855`**（0.0.0.0 实测仅监听 v4；全接口语义改 AF_INET6+IPV6_V6ONLY=0 双栈监听、探测失败回退 v4 留痕 + _normalize_peer_ip 归一 ::ffff: 防封禁/白名单失配；客户端零改动；README 补 IPv6 口径；bandit B104/B107 各 1 已 nosec 附理由抑制；哨兵 6），本批哨兵 +19（1605→**1624**），三处病灶 stash 双红逐项复验转红，ruff/mypy/bandit 全零、controller 零 Qt 红线复验通过；**下一步：用户真机复测本批 3 项预期（托盘暂停文案 1s 内切换且再点不重复下发 / 删配置首启控制台显眼打印明文+托盘气泡+终端无 disconnect 警告 / 主控端填被控端 IPv6 地址直连不超时）通过后即进阶段 10（打包发布）**）
+> 配套：`README.md`（面向用户的安装/使用/构建手册）、`CHANGELOG.md`（版本变更与破坏性变更）、`REFACTOR_PLAN.md`（计划）、`ASSESSMENT.md`（现状评估）、`STAGE1_REPORT.md` / `STAGE2_REPORT.md` / `STAGE3_REPORT.md` / `STAGE4_REPORT.md` / `STAGE5_REPORT.md` / `STAGE6_REPORT.md` / `STAGE7_REPORT.md` / `STAGE9_REPORT.md` / `STAGE10_REPORT.md`（阶段报告；阶段 8 延后未开）
+> 提交历史：`dfe2281` v4 基线 → 阶段 1 → … → 阶段 6（`103d2e3`/`bd7c7d1`）→ 阶段 7（`9b43461` 批A → `66093ca` 批B → `2a0cb86` 批C → `818da92` 批D → `80347c7` 批E → `1f94e5e` 批F 收口 → `dc466d0` 批F 补测）→ 阶段 9（`efd38a0` 任务书基线 → `188479d` 批0 → `44c3b2b` 批1 → `59b807c` 批2 → `f8ea292` 批3 → `f2ca14e`+`e7b6d9c` 批4 → `ab95509`/`12f6b7a`/`d07a79a`/`bfea86a`/`dde0b8a` 批5 → 收口 → 走查第十四批 `14d4d98`/`3a2112c`/`4cf3232` + 文档 `6d84ce2`）→ 阶段 10（`0904fb9` 更名+图标 → `c4e3c06` 打包链路+冒烟修复 → 收口）
 
 ---
 
@@ -400,3 +400,112 @@ loopback 判据: 认证通过 + H.264 帧（真实编码+真实解码 64×64×3 
 - 阶段 10 本体：本机 PyInstaller -D + 冷启动 <2s 验收、Nuitka CI、更新通道本地模拟、macOS/Linux CI 补验（R6）、性能压测（B3 修复后多客户端 broadcaster 实测）、硬编选项标定、qasync 3.16 切换预案。
 
 > STAGE9_INPROGRESS.md 为批 0-4 中断保护快照（保留备查，其"批 5 待办"已全部落地于本节与 STAGE9_REPORT）。
+
+---
+
+# 阶段 10：品牌更名 + 图标接入 + 打包发布 — ✅ 完成（详见 STAGE10_REPORT.md，2026-11-14 收口）
+
+**范围按用户下发的四组清单执行**（一 全局品牌更名 / 二 图标接入 + PyInstaller
+配置 / 三 Windows 安装包 / 四 本地验证与文档收口）。原 REFACTOR_PLAN 阶段 10
+的 10.2 Nuitka、10.4 macOS dmg、10.5 Linux deb、10.6 更新通道、10.7 CI **不在
+本次范围**（本机物理限制或需单独授权），已在 STAGE10_REPORT §7.1 如实列出。
+
+提交：`0904fb9`（更名 + 图标）→ `c4e3c06`（打包链路 + 冒烟修复）→ 收口批。
+
+## 交付要点
+
+- **更名**：发行名 `rdc` → `waltondesk`、入口 `waltondesk`、全部用户可见文案、
+  数据目录 `~/.remote_desktop` → `~/.waltondesk`（一次性迁移，**只搬不删**）、
+  自启注册表值名与 PID 文件 → `WaltonDesk`。**导入包名保持 `rdc`**（上千处
+  import 与开机自启命令依赖它）。新增 `rdc/brand.py` 品牌单点。
+  **刻意不改**三类会静默破坏存量状态的标识：DPAPI 熵串、密钥环条目归属键、
+  自签证书 CN（`brand.py` 顶部登记为契约）。
+- **图标**：`icon.png`（实测 1183×1220 非正方形）→ 9 档 `.ico`，双写根目录
+  （构建期需磁盘路径）与包内 `theme/`（运行期唯一加载点，已随 datas 进包）；
+  应用级默认图标让全部窗口自动继承；托盘改品牌底图 + 状态角标，资源缺失回退旧画法。
+- **打包**：`waltondesk.spec`（`.gitignore` 加 `!waltondesk.spec`——原 `*.spec`
+  是 v4 时代规则，不加例外则克隆后无法构建）。**windowed（`console=False`，
+  收口批反转）**：真机验收发现 console=True 产物双击必闪黑框（bootloader 先建
+  控制台、代码再销毁，"先有再关"物理上关不掉那一瞬）。windowed 下双击/自启
+  零黑框（进程物理上没有控制台）；CLI 场景由 `desktop_entry.ensure_console()`
+  按需补：先复用继承的 Win32 标准句柄（重定向/管道保真，实测上一版直接
+  AttachConsole 会劫持 `> log.txt` 令日志文件零字节），句柄无效才
+  AttachConsole 父控制台 → AllocConsole 新建。**体积 899 MB → 355 MB**
+  （`collect_all("PySide6")` 是元凶：Qt6WebEngineCore 194 MB + devtools .pak
+  83 MB；实测源码只用三个 Qt 模块，Qt6 DLL 144 → 13 个；收口批另挡掉
+  pydantic.mypy 连带拖入的 mypy 包）。
+- **安装包**：`waltondesk_installer.iss` 本机 `iscc`（Inno Setup 7.1.1）编译，
+  **向导全界面简体中文**（官方 `ChineseSimplified.isl`，收口批改造——初版只挂
+  Default.isl + 零星自译，中英混杂被用户打回）。四个 Inno 真实报错教训见
+  STAGE10_REPORT §5（ISPP 把 `#13#10` 当指令 / 段内不支持续行 /
+  `PrivilegesRequiredOverridesAllowed` 无 `output` 值 / `MsgBox` 只有 3 参）。
+  配套新增 `scripts/check_iss_syntax.py` 把迭代成本从几十分钟降到 1.6 秒。
+
+## 打包冒烟与真机走查发现并修复的六项
+
+收口前三项（真跑 frozen exe，非看日志）：
+
+1. **配置含 UTF-8 BOM 被误判损坏并静默重置**：记事本（Win10 1903+ 默认存带 BOM
+   的 UTF-8）另存过 `config.json` → `json.loads` 抛 "Unexpected UTF-8 BOM" →
+   **整份配置改名 `.corrupt` 并用默认值重建**，用户表现为"设置和口令突然全没了"。
+   改 `utf-8-sig`。
+2. **frozen 下回退输入后端静默失效**：`legacy_pyautogui` 延迟 import 分析器收不到
+   → spec 补 pyautogui 及依赖到 hiddenimports（源码能跑、exe 不行，最难查的形态）。
+3. 服务标识残留旧品牌 + 包 docstring 旧中文名（新增 AST 级残留哨兵）。
+
+用户装机验收后追加三项（v5.0.0 发布前修复，详见 STAGE10_REPORT §8）：
+
+4. **🔴 致命：输入模块漏包致控制断联**（`No module named 'rdc.input.windows'`）。
+   第 2 项当时只补了 pyautogui 三方包，**没补 rdc 自己的平台后端**——
+   `input/base.py` 用 `importlib.import_module` 加载后端，静态分析同样看不见，
+   且 `rdc.input.windows` 在 PYZ 清单里确实缺席（取证：8 个 input 子模块只入了
+   3 个被静态引用的）。修复：`collect_submodules("rdc")` 全量收集 + 用户点名的
+   5 个后端显式登记；**新增 `scripts/check_frozen_modules.py` 用"源码模块 vs
+   PYZ 清单"差集做机器核验**——首轮就抓出 11 个漏网（不止报障的 5 个，还含
+   `encoding.jpeg`、`input.keys`、`ui.status_panel` 等），这类"想到哪个补哪个"
+   的坑必须用差集比对而非人脑。
+5. **双击闪黑框**：console=True 物理缺陷，反转 windowed + 按需补控制台（含句柄
+   复用防重定向劫持），PE 子系统实测 `subsystem=2`，重定向 stdout 19 B /
+   stderr 140 B 保真。
+6. **安装包中英混杂**：换官方简体中文语言包 + Tasks 全中文字面量，编译日志
+   实测读到 `Languages\ChineseSimplified.isl`。
+
+## 验收（真实输出，收口批终值）
+
+```
+pytest: 1703 passed / 2 skipped，退出码 0（进场基线 1650，+53 哨兵：品牌 29 + 打包入口 24）
+ruff All checks passed · mypy 106 files（进场 103）· bandit High/Medium/Low 全 0
+双红哨兵 13/13 注入病灶转红（品牌 6/6 + 打包入口 7/7，含"句柄复用被忽略=重定向
+被劫持"新病灶），恢复后全绿
+产物 dist/WaltonDesk/ 355.1 MB；PE subsystem=2（GUI/windowed，双击零黑框的物理证据）
+动态导入差集核验 check_frozen_modules.py：源码 106 个 rdc.* 模块全部入包
+  （首轮差集抓出 11 个漏网，含报障的 rdc.input.windows / legacy_pyautogui）
+输入后端依赖闭合：windows.py 纯 stdlib（ctypes/sys）；pyautogui 及 4 个依赖全入包
+WaltonDesk.exe --version → "WaltonDesk v5.0.0"（exit 0）；重定向保真 stdout 19 B /
+  stderr 140 B（上一版直接 AttachConsole 时被劫持为 0 字节）
+冷启动 median 0.418s（验收线 <2s）
+pb/ + dark.qss + icon.ico + platforms/qwindows.dll + av/ + shiboken6/ 全部入包；
+  开发工具 mypy/mypyc/pydantic.mypy 已挡在产物之外（收口批核验发现并排除）
+安装包 dist/WaltonDesk_setup.exe 98.4 MB，版本信息读回全对；编译日志实测读取
+  Languages\ChineseSimplified.isl（向导全中文）
+frozen 被控端冒烟（隔离数据根）：初始密码生成并打印 → TLS 自签 → 双栈监听 →
+  libx264 AVAILABLE → pipeline 就绪；stderr 零输出
+QT_QPA_PLATFORM=offscreen 跑 --gui 存活 6s 不闪退（证明 frozen 资源真实可用）
+```
+
+哨兵锁的是"漏了就静默坏掉"的语义而非覆盖率数字，例：override 根下自动迁移必须
+跳过（否则把用户真实 `~/.remote_desktop` 整目录搬走）、`main()` 必须在任何配置
+读写前迁移（晚一步被新建空配置堵死）、新根已有 config.json 则整体放弃、
+GUI/托盘形态对控制台**零操作**（黑框病灶复发即红）而 `--version` 必须补控制台、
+继承句柄可用时绝不 AttachConsole（否则劫持用户的 `> log.txt`）。
+
+## 下一步
+
+- **阶段 8**（文件传输 + 音频，延后未开）：进入前**必须先做遗留 (a) 帧序号/
+  滑动窗口重放防护**——文件传输是有状态操作，帧 HMAC 无序号在此之前只是幂等
+  噪声级，之后就是真风险。遗留 (b) 文件传输面渗透随该阶段补测。
+- 发布前补 Authenticode 代码签名（否则 SmartScreen 告警；EV 证书同时是 v5.1.0
+  UIAccess 的前置）。
+- v5.1.0 特权操作范围（安全桌面 + 完整 Win 键）与体积优化（cv2 占 111 MB）、
+  密钥库命名空间迁移。
+
