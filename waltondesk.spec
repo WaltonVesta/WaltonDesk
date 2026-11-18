@@ -12,13 +12,18 @@
 
 设计要点（每条都是实测踩过的坑，改前先读理由）：
 
-1. **console=True**（不是 windowed）。被控端 headless 形态要在终端打印横幅与
-   初始密码、要 Ctrl+C；``--version``/``--help`` 由 argparse 内部写
-   ``sys.stdout``，windowed 下该流为 ``None`` → 直接 AttributeError 崩（第十二批
-   打包守卫修的就是这类）。GUI / 托盘形态改由
-   :func:`rdc.desktop_entry.frozen_entry` 在启动早期 ``FreeConsole()`` 释放黑框
-   —— 与 ``rdc.console_safety`` 的"stdin None = 无控制台 = 必须起 GUI"三态判定
-   天然自洽。**勿改成 console=False。**
+1. **console=False（windowed）**。收口批反转：真机验收发现 console=True 的
+   产物**双击必然闪过控制台黑框**——bootloader 先建控制台、我们代码再销毁它，
+   "先有再关"物理上关不掉那一瞬（STAGE9 第十二批 ``FreeConsole`` 方案只消灭
+   了常驻黑框，消灭不了闪烁）。windowed 从根上解决：进程本来就没有控制台，
+   双击永远无黑框。代价是 ``sys.stdout/stderr/stdin`` 为 None，CLI 需要终端
+   的场景（``--version``/``serve`` headless/``set-password``/``control``）由
+   :func:`rdc.desktop_entry.ensure_console` 运行时 AttachConsole/AllocConsole
+   按需补回；GUI/托盘形态零控制台操作。已知取舍：从 cmd 跑 headless
+   ``serve`` 时父 shell 不等待该 GUI 子系统进程、Ctrl+C 发不到它——日常
+   用法是 ``--tray`` 形态不受影响，headless 调试走源码形态 ``python -m rdc``。
+   全部启动期输出已走 ``console_safety`` 守卫或写日志文件，windowed 下
+   不可能崩在 print 上（第十二批防线，复验见哨兵）。
 
 2. **datas 必须显式带两个目录**，漏一个 exe 就闪退：
    - ``rdc/protocol/pb``：Protobuf 生成物（本机由 ``scripts/gen_proto.py`` 生成、
@@ -66,11 +71,23 @@ datas: list[tuple[str, str]] = [
 ]
 binaries: list[tuple[str, str]] = []
 hiddenimports: list[str] = [
-    # qasync 只在函数内延迟 import（ui/app.event_loop），分析器容易漏
+    # ── rdc 自身：动态导入面（真机致命病灶，v5.0.0 收口批）──────────────────
+    # 真机实测：被控端收到输入指令 → `No module named 'rdc.input.windows'` →
+    # 控制直接断联。根因：input/base.py 的后端工厂与 legacy 回退走
+    # importlib.import_module、secrets/host/encoding/ui 亦有函数内延迟导入，
+    # PyInstaller 静态分析全部不可见——**源码能跑、exe 运行期才炸**。
+    # 用户点名的 5 个输入后端先显式列出（保留可读性），随后
+    # collect_submodules("rdc") 全量兜底：新增动态导入模块无需再回来登记。
+    # 体积代价 <1 MB，与"运行期 ImportError 断联"完全不成对比。
+    "rdc.input.windows",
+    "rdc.input.legacy_pyautogui",
+    "rdc.input.macos",
+    "rdc.input.linux_x11",
+    "rdc.input.linux_wayland",
+    # ── 第三方：延迟导入/平台分派，分析器同样收不到 ─────────────────────────
+    # qasync 只在函数内延迟 import（ui/app.event_loop）
     "qasync",
-    # 同样属"函数内延迟导入"，分析器收不到：input/legacy_pyautogui._load_pyautogui
-    # 是 SendInput 不可用时的回退输入后端（真打包实测：不加这两条，frozen 下
-    # 回退路径静默抛 PlatformUnsupportedError —— 源码能跑、exe 不行，最难查）。
+    # input/legacy_pyautogui._load_pyautogui 延迟导入 pyautogui 及其依赖
     "pyautogui",
     "pygetwindow",
     "mouseinfo",
@@ -89,6 +106,12 @@ hiddenimports: list[str] = [
     "PIL",
     "pyperclip",
 ]
+
+# 全局兜底：rdc 全部子模块入包（含上面点名的 5 个，也覆盖
+# encoding.jpeg / input.keys / ui.status_panel 等 11 个差集实测漏网者）。
+# 回归核验：scripts/check_frozen_modules.py 用"源码模块 vs PYZ 清单"差集比对，
+# CI/构建后跑一次即可证明无动态导入漏网。
+hiddenimports += collect_submodules("rdc")
 
 for _mod in PYSIDE_MODULES:
     hiddenimports += collect_submodules(_mod)
@@ -117,6 +140,13 @@ a = Analysis(
         "pytestqt",
         "hypothesis",
         "IPython",
+        # 收口批核验发现：pydantic 自带 pydantic.mypy 插件（仅 mypy 检查期加载，
+        # 运行时 pydantic 不 import 它），静态分析沿 rdc→pydantic→pydantic.mypy
+        # 链把整个 mypy 包拖进产物（72 文件）。排除断链，开发期校验走 .venv
+        # 不受影响。
+        "mypy",
+        "mypyc",
+        "pydantic.mypy",
         # v4 遗留：v5 源码零引用（全树 grep 实测）
         "tkinter",
         "pydoc_data",
@@ -157,7 +187,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,  # 见 docstring 要点 1，勿改
+    console=False,  # windowed：双击零黑框（见 docstring 要点 1，收口批反转）
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
